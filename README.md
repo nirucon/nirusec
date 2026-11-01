@@ -168,6 +168,7 @@ Run the privileged helper directly only in a disposable environment:
 `NIRUSEC_HELPER=/path/to/nirusec` lets the GUI use that helper instead of
 `pkexec`.
 
+- [Roadmap and remaining work](ROADMAP.md)
 - [End-to-end implementation brief](AGENTS.md)
 
 MIT. Copyright 2026 Nicklas Rudolfsson.
