@@ -8,7 +8,7 @@ blocked traffic, package updates, CPU microcode, firmware and running Docker
 containers. It follows the active NIRUX theme and works in narrow tiling
 layouts as well as large windows.
 
-**Current release: 0.1.5.** It is a working core, not an independent security
+**Current release: 0.1.6.** It is a working core, not an independent security
 audit. The limitations at the bottom are deliberate and visible in the UI.
 
 ## Install
@@ -28,8 +28,8 @@ artifact to the fixed root-owned helper path and installs the PolicyKit action.
 Standalone release installation:
 
 ```sh
-tar -xzf nirusec-0.1.5-x86_64-linux-gnu.tar.gz
-cd nirusec-0.1.5
+tar -xzf nirusec-0.1.6-x86_64-linux-gnu.tar.gz
+cd nirusec-0.1.6
 sudo ./install.sh
 ```
 

@@ -530,7 +530,7 @@ impl NirusecApp {
                     self.confirm = Some(Confirm { kind: ConfirmKind::EnableFirewall, title: "Enable UFW?".into(), body: "This will enable the firewall with the current rules and defaults.".into(), action: "ufw-enable" });
                 }
             } else if ui.add_enabled(!self.busy, Button::new("Disable firewall")).clicked() {
-                self.confirm = Some(Confirm { kind: ConfirmKind::DisableFirewall, title: "Disable UFW?".into(), body: "This removes firewall protection for exposed services. Rollback is possible if you confirm it quickly.".into(), action: "ufw-disable" });
+                self.confirm = Some(Confirm { kind: ConfirmKind::DisableFirewall, title: "Disable UFW?".into(), body: "This removes firewall protection for exposed services. There is no automatic rollback for this action; use Emergency safe mode from a local console if access is lost.".into(), action: "ufw-disable" });
             }
             if ui.add_enabled(!self.busy, Button::new("Emergency safe mode…").fill(pal.error)).clicked() {
                 self.confirm = Some(Confirm {
