@@ -70,6 +70,13 @@ fn notify_if_needed(previous: Option<&Status>, current: &Status) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let helper_name = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name == "nirusec-helper"))
+        .unwrap_or(false);
+    if helper_name {
+        helper::run(&args);
+    }
     if args.first().is_some_and(|arg| arg == "--helper") {
         helper::run(&args[1..]);
     }
