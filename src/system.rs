@@ -6,7 +6,7 @@ use crate::{
 use std::{
     collections::HashMap,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 
@@ -561,6 +561,98 @@ pub fn collect() -> Status {
         logs,
         errors,
     }
+}
+
+fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
+    fs::create_dir_all(target).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let destination = target.join(entry.file_name());
+        if path.is_dir() {
+            copy_tree(&path, &destination)?;
+        } else {
+            fs::copy(&path, &destination).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Back up the small `/etc/ufw` configuration before a recovery action.
+/// Backups are root-only and never placed in a repository or user cache.
+pub fn backup_ufw() -> Result<PathBuf, String> {
+    let root = PathBuf::from("/var/backups/nirusec");
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let target = root.join(format!("ufw-{stamp}"));
+    copy_tree(Path::new("/etc/ufw"), &target)?;
+    let mut backups: Vec<PathBuf> = fs::read_dir(&root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("ufw-"))
+        })
+        .collect();
+    backups.sort();
+    while backups.len() > 5 {
+        let old = backups.remove(0);
+        let _ = fs::remove_dir_all(old);
+    }
+    Ok(target)
+}
+
+/// Emergency recovery: preserve the current UFW files, apply a small
+/// management-safe policy and leave SSH reachable. This is intentionally more
+/// open than normal profiles; run it from a local console or trusted SSH path.
+pub fn safe_mode() -> Result<String, String> {
+    let backup = backup_ufw()?;
+    let mut log = format!("backup {}\n", backup.display());
+    for args in [
+        vec!["--force", "reset"],
+        vec!["default", "deny", "incoming"],
+        vec!["default", "allow", "outgoing"],
+        vec!["allow", "in", "on", "lo"],
+        vec!["allow", "in", "on", "tailscale0"],
+        vec!["allow", "22/tcp"],
+        vec!["allow", "41641/udp"],
+        vec!["--force", "enable"],
+    ] {
+        log.push_str(&run_root_command("ufw", &args)?);
+        log.push('\n');
+    }
+    Ok(format!("{log}Safe mode active. Current UFW files were backed up. SSH is reachable on port 22; Tailscale is trusted."))
+}
+
+pub fn restore_ufw() -> Result<String, String> {
+    let root = PathBuf::from("/var/backups/nirusec");
+    let mut backups: Vec<PathBuf> = fs::read_dir(&root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("ufw-"))
+        })
+        .collect();
+    backups.sort();
+    let Some(latest) = backups.last() else {
+        return Err("no NIRUSEC UFW backup exists".into());
+    };
+    run_root_command("ufw", &["--force", "disable"])?;
+    copy_tree(latest, Path::new("/etc/ufw"))?;
+    let output = run_root_command("ufw", &["--force", "enable"])?;
+    Ok(format!(
+        "restored {}
+{output}",
+        latest.display()
+    ))
 }
 
 fn package_install_command(packages: &[String]) -> Result<(), String> {

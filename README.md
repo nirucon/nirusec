@@ -7,7 +7,7 @@ quiet, responsive interface that follows the active NIRUX theme.
 
 ## Project status
 
-**0.1.4 core implementation.** A single Rust binary provides the themed GUI and
+**0.1.5 core implementation.** A single Rust binary provides the themed GUI and
 a locked-down `--helper` mode used by PolicyKit. It includes the overview,
 firewall rule management, listening ports, logs, package updates, firmware
 recommendations, fwupd discovery and Docker containers. Live acceptance on all
@@ -208,6 +208,13 @@ or flash firmware automatically.
 [AGENTS.md](AGENTS.md) is the end-to-end implementation assignment, including
 architecture, authorization, dependency handling, distro-specific requirements,
 bare-metal verification, release/update responsibilities and completion gates.
+
+Operational notes:
+
+- [Emergency access](docs/EMERGENCY.md) — local console, safe mode and backup restore.
+- [Firewall profiles](docs/PROFILES.md) — proposed Off/Soft/Medium/Hard/Gaming policy.
+- [Fail2ban guidance](docs/FAIL2BAN.md) — recommended conservative configuration.
+- [UA Internt on niruxwork](docs/UA-INTERNT.md) — roaming and dual-path access.
 
 The owner will name deployment targets when pointing the agent at this repo.
 Those machines may be used to build, benchmark and test actual release binaries.

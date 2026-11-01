@@ -11,6 +11,8 @@ Usage:
   nirusec [--open overview|firewall|ports|logs|updates|firmware|docker]
   nirusec --check [--if-stale SECONDS] [--quiet]
   nirusec --status [--json]
+  sudo nirusec --safe-mode       emergency local-console recovery
+  sudo nirusec --restore-ufw     restore the latest NIRUSEC UFW backup
   nirusec --version
 
 The checker writes a versioned cache for NIRUBAR and other suite components.
@@ -81,6 +83,34 @@ fn main() {
     }
     if args.first().is_some_and(|arg| arg == "--helper") {
         helper::run(&args[1..]);
+    }
+    if args.first().is_some_and(|arg| arg == "--safe-mode") {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("nirusec --safe-mode must run as root (use sudo from a local console)");
+            std::process::exit(1);
+        }
+        match system::safe_mode() {
+            Ok(message) => println!("{message}"),
+            Err(error) => {
+                eprintln!("nirusec: safe mode failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if args.first().is_some_and(|arg| arg == "--restore-ufw") {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("nirusec --restore-ufw must run as root");
+            std::process::exit(1);
+        }
+        match system::restore_ufw() {
+            Ok(message) => println!("{message}"),
+            Err(error) => {
+                eprintln!("nirusec: restore failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
     }
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
         println!("NIRUSEC {}", env!("CARGO_PKG_VERSION"));

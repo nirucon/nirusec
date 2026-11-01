@@ -70,6 +70,7 @@ enum ConfirmKind {
     InstallFirmware,
     UpdateFirmware,
     DeleteRule(u32),
+    SafeMode,
 }
 
 struct Confirm {
@@ -531,6 +532,14 @@ impl NirusecApp {
             } else if ui.add_enabled(!self.busy, Button::new("Disable firewall")).clicked() {
                 self.confirm = Some(Confirm { kind: ConfirmKind::DisableFirewall, title: "Disable UFW?".into(), body: "This removes firewall protection for exposed services. Rollback is possible if you confirm it quickly.".into(), action: "ufw-disable" });
             }
+            if ui.add_enabled(!self.busy, Button::new("Emergency safe mode…").fill(pal.error)).clicked() {
+                self.confirm = Some(Confirm {
+                    kind: ConfirmKind::SafeMode,
+                    title: "Enter emergency safe mode?".into(),
+                    body: "Backs up /etc/ufw, resets the rules to a small recovery policy, allows SSH on port 22 and trusts Tailscale. Use only when locked out or repairing access.".into(),
+                    action: "safe-mode",
+                });
+            }
             ui.label(RichText::new(format!("Incoming: {} · Outgoing: {}", self.status.firewall.incoming.as_deref().unwrap_or("?"), self.status.firewall.outgoing.as_deref().unwrap_or("?"))).color(pal.disabled));
         });
         ui.add_space(8.0);
@@ -949,7 +958,8 @@ impl NirusecApp {
                 }
                 ConfirmKind::UpdatePackages
                 | ConfirmKind::InstallFirmware
-                | ConfirmKind::UpdateFirmware => {
+                | ConfirmKind::UpdateFirmware
+                | ConfirmKind::SafeMode => {
                     self.run_helper(ctx, action, Vec::new());
                 }
             }

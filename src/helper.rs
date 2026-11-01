@@ -58,6 +58,14 @@ pub fn run(args: &[String]) -> ! {
         "update" => print(system::update_packages()),
         "firmware-install" => print(system::install_firmware()),
         "firmware-update" => print(system::update_firmware()),
+        "safe-mode" => match system::safe_mode() {
+            Ok(message) => print(ufw::success(&message, None)),
+            Err(error) => print(ufw::failure(&error)),
+        },
+        "restore-ufw" => match system::restore_ufw() {
+            Ok(message) => print(ufw::success(&message, None)),
+            Err(error) => print(ufw::failure(&error)),
+        },
         _ => print(ufw::failure("unknown operation")),
     }
 }
