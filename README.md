@@ -7,7 +7,7 @@ quiet, responsive interface that follows the active NIRUX theme.
 
 ## Project status
 
-**0.1.0 core implementation.** A single Rust binary provides the themed GUI and
+**0.1.1 core implementation.** A single Rust binary provides the themed GUI and
 a locked-down `--helper` mode used by PolicyKit. It includes the overview,
 firewall rule management, listening ports, logs, package updates, firmware
 recommendations, fwupd discovery and Docker containers. Live acceptance on all
