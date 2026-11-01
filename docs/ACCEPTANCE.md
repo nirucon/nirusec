@@ -63,3 +63,38 @@ versions, artifact checksum and source commit for every actual test host.
 
 Do not mark sleeping/offline machines complete. Keep credentials and private
 network details out of this public record.
+
+## 0.1.4 live deployment run — 2026-11-01
+
+Artifact: NIRUSEC 0.1.4, one x86_64 glibc binary. NIRUX 0.12.169,
+NIRUWM 0.16.153, NIRUBAR 0.18.74.
+
+| Machine | Distro | Installed | Cache/checker | UFW helper | GUI launch | Bar entry |
+|---|---|---|---|---|---|---|
+| studio | Debian | 0.1.4 | pass | pass (`Status: inactive`) | pass, tiled live X11 | pass, shield left of Quick Settings |
+| othala | Debian | 0.1.4 | pass | pass (`Status: inactive`) | not run live | config present |
+| niruxwork | Debian | 0.1.4 | pass | pass (`Status: inactive`) | not run live | config present |
+| void | Void | 0.1.4 | pass | pass (active rules returned) | not run live | config present |
+| algiz | Arch | 0.1.4 | pass | pass (active rules returned) | not run live | config present |
+| ingwaz | Debian | 0.1.4 | pass | pass (`Status: inactive`) | not run live | config present |
+
+Live GUI verification used the installed release on studio. Narrow (single-view)
+and wide (navigation + detail) layouts were exercised under Xvfb at 420 and
+1200 logical pixels before deployment. The installed GUI was also launched in
+the tiled NIRUWM session. Idle release process observation: ~0.7% CPU, ~85 MB
+RSS, 7 threads; no continuous redraws were observed. No zombies were present
+after deployment checks.
+
+UFW was installed as a dependency but was intentionally **not enabled**; four
+machines therefore report `critical` because UFW is inactive while sockets are
+exposed. This is a real state, not a fabricated result. The owner must review
+and enable/configure UFW explicitly. The initial critical transition check is
+suppressed when no previous cache exists, then deduplicated after the first
+known state.
+
+Not claimed as tested in this run: adding/deleting real firewall rules through
+the GUI’s PolicyKit prompt, package installation/upgrade, actual fwupd device
+flashing, connectivity rollback on every distro, long-duration soak beyond the
+observations above, and every NIRUX theme. These remain implementation gates;
+the helper’s UFW read path and validation tests passed, but privileged GUI
+authentication and destructive update/firmware paths were not exercised.
