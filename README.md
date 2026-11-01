@@ -8,7 +8,7 @@ blocked traffic, package updates, CPU microcode, firmware and running Docker
 containers. It follows the active NIRUX theme and works in narrow tiling
 layouts as well as large windows.
 
-**Current release: 0.1.6.** It is a working core, not an independent security
+**Current release: 0.1.7.** It is a working core, not an independent security
 audit. The limitations at the bottom are deliberate and visible in the UI.
 
 ## Install
@@ -28,8 +28,8 @@ artifact to the fixed root-owned helper path and installs the PolicyKit action.
 Standalone release installation:
 
 ```sh
-tar -xzf nirusec-0.1.6-x86_64-linux-gnu.tar.gz
-cd nirusec-0.1.6
+tar -xzf nirusec-0.1.7-x86_64-linux-gnu.tar.gz
+cd nirusec-0.1.7
 sudo ./install.sh
 ```
 
@@ -62,6 +62,8 @@ as a fresh green result.
 
 - Read UFW enabled state and default policies.
 - Load the actual numbered rules after an explicit PolicyKit authentication.
+- Apply Off/Soft/Medium/Hard/Gaming presets with a 120-second confirmation
+  window and automatic rollback.
 - Enable/disable UFW.
 - Add a validated incoming rule: allow/limit/deny/reject, TCP/UDP, port or
   range, optional IP/CIDR source and comment.
@@ -132,7 +134,7 @@ access Docker, NIRUSEC says so rather than requesting root unnecessarily.
 
 ## Current limitations
 
-- Firewall **profiles** are designed but not fully enabled in the GUI; see
+- Firewall profiles are implemented with a 120-second rollback window; see
   [Profile design](docs/PROFILES.md).
 - Fail2ban guidance exists, but NIRUSEC does not install or automatically
   reconfigure fail2ban yet; see [Fail2ban guidance](docs/FAIL2BAN.md).

@@ -8,6 +8,9 @@ pub struct HelperResponse {
     pub message: String,
     pub status: Option<String>,
     pub output: Option<String>,
+    /// Present for profile changes; the GUI must confirm within the rollback window.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 pub struct RuleRequest {
@@ -147,12 +150,14 @@ pub fn status() -> HelperResponse {
             },
             status: Some(status_text(&output)),
             output: None,
+            token: None,
         },
         Err(error) => HelperResponse {
             ok: false,
             message: error,
             status: None,
             output: None,
+            token: None,
         },
     }
 }
@@ -237,6 +242,7 @@ fn run_change(args: &[String], success: &str) -> HelperResponse {
                 message: success.into(),
                 status: after.status,
                 output: Some(status_text(&output)),
+                token: None,
             }
         }
         Ok(output) => HelperResponse {
@@ -244,6 +250,7 @@ fn run_change(args: &[String], success: &str) -> HelperResponse {
             message: status_text(&output),
             status: None,
             output: None,
+            token: None,
         },
         Err(error) => failure(&error),
     }
@@ -255,6 +262,7 @@ pub fn failure(message: &str) -> HelperResponse {
         message: message.into(),
         status: None,
         output: None,
+        token: None,
     }
 }
 
@@ -264,6 +272,7 @@ pub fn success(message: &str, output: Option<String>) -> HelperResponse {
         message: message.into(),
         status: None,
         output,
+        token: None,
     }
 }
 

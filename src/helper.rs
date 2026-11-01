@@ -4,7 +4,7 @@
 //! Arguments are explicit values, never a shell string or executable path.
 
 use nirusec::{
-    system,
+    profiles, system,
     ufw::{self, HelperResponse, RuleRequest},
 };
 
@@ -66,6 +66,23 @@ pub fn run(args: &[String]) -> ! {
             Ok(message) => print(ufw::success(&message, None)),
             Err(error) => print(ufw::failure(&error)),
         },
+        "profile-apply" => {
+            let Some(profile) = args
+                .get(1)
+                .and_then(|value| profiles::Profile::parse(value))
+            else {
+                print(ufw::failure(
+                    "profile-apply needs off, soft, medium, hard or gaming",
+                ));
+            };
+            print(profiles::apply(profile));
+        }
+        "profile-confirm" => {
+            let Some(token) = args.get(1) else {
+                print(ufw::failure("profile-confirm needs a token"));
+            };
+            print(profiles::confirm(token));
+        }
         _ => print(ufw::failure("unknown operation")),
     }
 }

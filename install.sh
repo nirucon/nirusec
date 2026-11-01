@@ -47,13 +47,13 @@ runtime_deps() {
     say 'Checking NIRUSEC GUI runtime dependencies…'
     case "$OS" in
         debian)
-            sudo apt-get install -y libxkbcommon-x11-0 libx11-6 libgl1 libegl1 libxcb1 libxkbcommon0 ufw >/dev/null 2>&1 || say 'warning: could not verify all GUI runtime packages'
+            sudo apt-get install -y libxkbcommon-x11-0 libx11-6 libgl1 libegl1 libxcb1 libxkbcommon0 ufw pkexec >/dev/null 2>&1 || say 'warning: could not verify all GUI runtime packages'
             ;;
         arch)
-            sudo pacman -S --needed --noconfirm libxkbcommon libxkbcommon-x11 libx11 libxcb libglvnd ufw >/dev/null 2>&1 || say 'warning: could not verify all GUI runtime packages'
+            sudo pacman -S --needed --noconfirm libxkbcommon libxkbcommon-x11 libx11 libxcb libglvnd ufw polkit >/dev/null 2>&1 || say 'warning: could not verify all GUI runtime packages'
             ;;
         void)
-            sudo xbps-install -y libxkbcommon libxkbcommon-x11 libX11 libxcb libglvnd ufw >/dev/null 2>&1 || say 'warning: could not verify all GUI runtime packages'
+            sudo xbps-install -y libxkbcommon libxkbcommon-x11 libX11 libxcb libglvnd ufw polkit >/dev/null 2>&1 || say 'warning: could not verify all GUI runtime packages'
             ;;
         *) say 'warning: unknown distribution; check libxkbcommon-x11 and OpenGL manually' ;;
     esac

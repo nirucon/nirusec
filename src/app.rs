@@ -6,7 +6,7 @@ use egui::{
 use nirusec::{
     cache,
     model::*,
-    system,
+    profiles, system,
     ufw::{self, HelperResponse, RuleRequest},
 };
 use std::{
@@ -71,6 +71,7 @@ enum ConfirmKind {
     UpdateFirmware,
     DeleteRule(u32),
     SafeMode,
+    ApplyProfile(&'static str),
 }
 
 struct Confirm {
@@ -97,6 +98,7 @@ pub struct NirusecApp {
     rules_loaded: bool,
     form: RuleForm,
     confirm: Option<Confirm>,
+    profile_token: Option<String>,
     started: Instant,
 }
 
@@ -123,6 +125,7 @@ impl NirusecApp {
                 comment: String::new(),
             },
             confirm: None,
+            profile_token: None,
             started: Instant::now(),
         };
         if app.status.checked_at == 0 || cache::age_seconds(&app.status) > 300 {
@@ -180,6 +183,9 @@ impl NirusecApp {
                                 Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
                             }
                         }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        Err("PolicyKit (pkexec) is not installed; install it to load rules or change the firewall".into())
                     }
                     Err(error) => Err(error.to_string()),
                 };
@@ -239,6 +245,9 @@ impl NirusecApp {
                                 self.status.firewall.rules = rules;
                                 self.status.firewall.rules_available = true;
                                 self.rules_loaded = true;
+                            }
+                            if response.token.is_some() {
+                                self.profile_token = response.token;
                             }
                             self.message = Some((response.message, false));
                             if let Some(output) = response.output {
@@ -522,6 +531,44 @@ impl NirusecApp {
             ))
             .color(pal.muted),
         );
+        if let Some(token) = self.profile_token.clone() {
+            Frame::none()
+                .fill(pal.panel)
+                .stroke(Stroke::new(1.0_f32, pal.warning))
+                .rounding(6.0)
+                .inner_margin(10.0)
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Profile applied — rollback is armed").strong().color(pal.warning));
+                    ui.label(RichText::new("Confirm within 120 seconds or the previous firewall returns. Test a new SSH connection first.").color(pal.muted).size(11.0));
+                    if ui.add_enabled(!self.busy, Button::new("Keep this profile")).clicked() {
+                        self.run_helper(ctx, "profile-confirm", vec![token.clone()]);
+                        self.profile_token = None;
+                    }
+                });
+            ui.add_space(8.0);
+        }
+        ui.label(RichText::new("Profiles").strong());
+        ui.horizontal_wrapped(|ui| {
+            for (id, label, description) in [
+                ("off", "Off", profiles::Profile::Off.description()),
+                ("soft", "Soft", profiles::Profile::Soft.description()),
+                ("medium", "Medium", profiles::Profile::Medium.description()),
+                ("hard", "Hard", profiles::Profile::Hard.description()),
+                ("gaming", "Gaming", profiles::Profile::Gaming.description()),
+            ] {
+                let button = Button::new(label).fill(if id == "off" { pal.error } else { pal.surface });
+                if ui.add_enabled(!self.busy, button).on_hover_text(description).clicked() {
+                    self.confirm = Some(Confirm {
+                        kind: ConfirmKind::ApplyProfile(id),
+                        title: format!("Apply {label} firewall profile?"),
+                        body: format!("{description}\n\nThe current UFW files are backed up. You must confirm within 120 seconds or the previous firewall returns."),
+                        action: "profile-apply",
+                    });
+                }
+            }
+        });
+        ui.label(RichText::new("Profiles reset UFW to a deterministic policy. Test a new SSH session before closing your current one.").color(pal.disabled).size(11.0));
+        ui.add_space(8.0);
         let enabled = self.status.firewall.enabled;
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(match enabled { Some(true) => "Enabled", Some(false) => "Disabled", None => "State unknown" }).color(match enabled { Some(true) => pal.success, Some(false) => pal.error, None => pal.warning }));
@@ -955,6 +1002,9 @@ impl NirusecApp {
                 }
                 ConfirmKind::DeleteRule(number) => {
                     self.run_helper(ctx, "ufw-delete", vec![number.to_string()]);
+                }
+                ConfirmKind::ApplyProfile(profile) => {
+                    self.run_helper(ctx, "profile-apply", vec![profile.to_string()]);
                 }
                 ConfirmKind::UpdatePackages
                 | ConfirmKind::InstallFirmware

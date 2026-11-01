@@ -724,7 +724,7 @@ pub fn update_packages() -> HelperResponse {
     }
 }
 
-fn run_root_command(program: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_root_command(program: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new(program)
         .args(args)
         .env("LC_ALL", "C")

@@ -5,5 +5,6 @@
 
 pub mod cache;
 pub mod model;
+pub mod profiles;
 pub mod system;
 pub mod ufw;

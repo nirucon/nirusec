@@ -27,5 +27,7 @@ Every profile except Off keeps an explicit recovery path.
 - Keep profile history and a one-click **Restore last working profile**.
 - Provide a local-console `--safe-mode` that is simpler than the GUI.
 
-Profiles are not yet fully implemented in the GUI. The recovery CLI and safe
-mode exist in this release; the profile presets are the next hardening step.
+Profiles are implemented in the GUI with a short rollback window. Applying a
+profile resets UFW to the chosen deterministic policy, backs up the old files
+and starts a root-owned timer. Confirm **Keep this profile** after testing a new
+SSH connection; otherwise the previous policy returns after 120 seconds.
