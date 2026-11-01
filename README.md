@@ -1,225 +1,163 @@
 # NIRUSEC
 
-**A planned Rust security and maintenance GUI for [NIRUX](https://github.com/nirucon/nirux), by Nicklas Rudolfsson.**
+**Security, firewall, update and firmware overview for [NIRUX](https://github.com/nirucon/nirux), by Nicklas Rudolfsson.**
 
-Firewall rules, network exposure, system updates and firmware, presented in a
-quiet, responsive interface that follows the active NIRUX theme.
+NIRUSEC is a quiet Rust/egui desktop tool for inspecting and changing the parts
+of a Linux machine that are easy to forget: UFW state, listening services,
+blocked traffic, package updates, CPU microcode, firmware and running Docker
+containers. It follows the active NIRUX theme and works in narrow tiling
+layouts as well as large windows.
 
-## Project status
-
-**0.1.5 core implementation.** A single Rust binary provides the themed GUI and
-a locked-down `--helper` mode used by PolicyKit. It includes the overview,
-firewall rule management, listening ports, logs, package updates, firmware
-recommendations, fwupd discovery and Docker containers. Live acceptance on all
-owner machines is recorded in the release/deployment notes; missing privileges,
-unsupported firmware and unavailable package metadata are shown explicitly
-rather than guessed.
-
-The remaining work is hardening and breadth, not a scaffold: more UFW syntax
-coverage, richer log retention/aggregation, connectivity rollback test coverage
-on every distro, and a completed live acceptance matrix. Do not treat this
-README as a claim of zero bugs or a completed independent security audit.
+**Current release: 0.1.5.** It is a working core, not an independent security
+audit. The limitations at the bottom are deliberate and visible in the UI.
 
 ## Install
 
-Use NIRUX for the suite integration, or install the release without compiling
-anything on the target:
+With NIRUX:
 
 ```sh
-curl -fLO https://github.com/nirucon/nirusec/releases/latest/download/nirusec
-chmod +x nirusec
-# use the release install.sh beside the assets, or install the binary as below
+nirux extras select nirusec
+nirux extras install nirusec
 ```
 
-The release is one x86_64 glibc binary. It supports both GUI and root helper
-modes; the installer copies that same file to the fixed root-owned helper path
-and installs the PolicyKit action. The installer downloads the prebuilt release
-by default; `--build` is only for development. Installation never enables UFW
-or flashes firmware.
+The NIRUX extra downloads the prebuilt release; no Rust build is performed on
+the target. The release is one x86_64 glibc binary. The same binary supports
+the GUI and the root helper mode used by PolicyKit. The installer copies that
+artifact to the fixed root-owned helper path and installs the PolicyKit action.
+
+Standalone release installation:
 
 ```sh
-./install.sh             # prebuilt binary, no local Rust build
-./install.sh --build     # development checkout only
+tar -xzf nirusec-0.1.5-x86_64-linux-gnu.tar.gz
+cd nirusec-0.1.5
+sudo ./install.sh
 ```
 
-## What NIRUSEC does
+`./install.sh` downloads the published binary by default. `--build` is only for
+development checkouts. Installation installs UFW as a dependency but **does not
+enable it** and never flashes firmware.
+
+## Use
+
+```sh
+nirusec                         # GUI
+nirusec --open firewall         # open a specific view
+nirusec --check                 # write the shared status cache
+nirusec --status [--json]       # read the cache
+sudo /usr/local/libexec/nirusec-helper safe-mode    # emergency recovery
+sudo /usr/local/libexec/nirusec-helper restore-ufw  # restore latest backup
+```
+
+`--check` is intentionally short-lived. NIRUBAR triggers it when the shared
+cache is stale, so a running bar does not start package queries every second.
 
 ### Overview
 
-A useful first screen answers:
-
-- Is the firewall active, and what are its incoming/outgoing defaults?
-- Which services listen on localhost, LAN, Tailscale or all interfaces?
-- Are SSH and Tailscale running? What access is currently exposed?
-- Are system/security updates available, or is a restart required?
-- Is relevant device firmware or CPU microcode missing or outdated?
-- When was each result checked, and did that check actually succeed?
-
-Display concrete facts rather than a made-up security score. An unavailable,
-stale or failed check must never appear as a fresh green result.
+The first screen shows the hostname, firewall state, number of listening
+sockets, available package updates, firmware recommendations, Docker state and
+the age of the last check. Unknown or failed checks are shown as unknown, not
+as a fresh green result.
 
 ### Firewall
 
-UFW is the first supported management backend:
-
-- Enable/disable UFW; inspect and change default policies and logging level.
-- Add, inspect, edit and delete rules for TCP/UDP, ports/ranges, source and
-  destination networks, IPv4/IPv6, direction and interfaces.
-- Support UFW application profiles, ordered rules and rate limiting where the
-  installed UFW supports them. Explain unsupported features honestly.
-- Show both a readable description and the actual structured rule parameters.
-- Provide search, filtering, configuration export, saved profiles and recovery.
-- Detect firewalld/direct nftables or other active managers before changing UFW;
-  do not silently replace an existing firewall configuration.
-- Detect active SSH/Tailscale access and provide timed, privileged automatic
-  rollback for connectivity-affecting changes. Rollback must survive a GUI
-  crash, disconnect or logout.
-
-Example: **Allow SSH from Tailscale on `tailscale0`, TCP port 22.**
+- Read UFW enabled state and default policies.
+- Load the actual numbered rules after an explicit PolicyKit authentication.
+- Enable/disable UFW.
+- Add a validated incoming rule: allow/limit/deny/reject, TCP/UDP, port or
+  range, optional IP/CIDR source and comment.
+- Delete a numbered rule after confirmation.
+- **Emergency safe mode** backs up `/etc/ufw`, resets to a small recovery
+  policy and makes SSH reachable again. It is intentionally more open than a
+  normal profile and is intended for a local console or trusted SSH session.
 
 ### Ports and logs
 
-- Show listening TCP/UDP sockets, bound addresses, interfaces and owning
-  processes when permissions allow. Distinguish listening from established
-  connections and firewall policy from actual reachability.
-- Filter existing firewall logs by time, source, destination, port and action.
-- Use small graphs for blocked traffic over time and the most frequently
-  blocked ports/sources. No synthetic data or continuous packet capture.
-- Show an explicit empty/unavailable state when logging is off or records cannot
-  be read. Missing logs do not mean there were no blocked packets.
-- Keep retention and disk use bounded; redact sensitive details from exported
-  diagnostics and never collect packet payloads by default.
+- Show listening TCP/UDP sockets with loopback, LAN, Tailscale or all-interface
+  scope.
+- Show UFW logs when readable, including blocked/allowed counts and a compact
+  bar chart of the most common blocked ports.
+- Report unavailable logs or permissions instead of implying there was no
+  blocked traffic.
 
-### System and security updates
+### Updates
 
-Use distribution package managers and their normal signature verification:
-
-| Distribution | Update behaviour |
-|---|---|
-| Debian | Identify updates from configured security origins where reliable; preview package/dependency changes and install through APT. Also offer a normal system update. |
-| Arch Linux | Offer a full supported `pacman -Syu` transaction. Flag relevant advisories when available; never manufacture a security-only partial upgrade. |
-| Void Linux | Use supported XBPS update sequencing and full transactions. Show advisory information when available without promising complete security-only classification. |
-
-Show available changes, progress, package-manager locks, failures and any
-restart/logout requirements. Reuse existing NIRUX/NIRUFLOW update integration
-where appropriate instead of creating competing package-manager wrappers.
+- Debian: configured APT upgrade set; no false claim of security-only
+  classification when the repository metadata does not provide it.
+- Arch: full supported `pacman -Syu`; security advisories are not a partial
+  upgrade mechanism.
+- Void: supported XBPS transaction.
+- Package updates run through the fixed privileged helper and show the package
+  manager result. A lock or failure is reported, not hidden.
 
 ### Firmware and microcode
 
-Firmware installation and updates belong in NIRUSEC, with three distinct views:
+- Recommend hardware-relevant distribution packages, including the matching
+  Intel/AMD microcode package where detectable.
+- Show whether `fwupd` is available and summarise its update state.
+- Install the recommended firmware packages only after confirmation.
+- Device flashing is a separate, explicit action with the usual power/reboot
+  requirements. A status check never flashes anything.
+- Touchpad tap/scroll settings are libinput/Xorg settings, not firmware; those
+  remain in NIRUX input configuration.
 
-1. **OS firmware packages:** GPU, Wi-Fi, Bluetooth, audio/SOF and other relevant
-   runtime firmware provided by the distribution.
-2. **CPU microcode:** appropriate Intel/AMD packages and activation/reboot state.
-3. **Device firmware updates:** BIOS/UEFI and supported devices through `fwupd`
-   and configured vendor/LVFS sources when available.
+### Docker
 
-Recommend hardware-relevant packages; do not install every firmware package.
-Explain that touchpad tap-to-click and two-finger scrolling are usually
-libinput/Xorg settings, not missing firmware. Link to the existing NIRUX input
-controls rather than duplicating those settings.
-
-Detect firmware repository availability and hardware support on each distro.
-Do not silently rewrite Debian repository components, add third-party feeds,
-download unsigned blobs or claim `fwupd` supports an unsupported device. Show
-the installed version, available version, source, update conditions and results.
-Device flashing must be an explicit user action with the tool's power/reboot
-requirements visible; checking for updates must not flash anything.
-
-### Profiles and later extensions
-
-Saved Home/Public/Server firewall profiles and a bounded local change history
-are part of the intended product. After the core is verified, useful extensions
-include read-only SSH hardening status, Fail2ban status and richer local
-Tailscale exposure information. Tailnet ACL editing and central remote fleet
-management are separate integrations, not assumed capabilities of the local GUI.
-
-## Interface and themes
-
-Use Rust with egui/eframe unless repository research reveals a concrete reason
-to choose otherwise. The design must work in narrow laptop tiling windows:
-
-- Wide windows: navigation, rule list and details side by side.
-- Narrow windows: compact navigation, one view at a time and a clear Back action.
-- Tables become readable cards/rows; forms stack; essential controls never
-  require horizontal scrolling or mouse hover.
-- Suggested views: **Overview · Firewall · Ports · Logs · Updates · Firmware**.
-- Keyboard navigation, visible focus, search/filter, usable scaling and
-  accessible status text accompany icons and colours.
-- Follow active NIRUX built-in/custom themes and appearance overrides, with
-  live reload, correct precedence, light/dark contrast and reduced motion.
-- Use small functional graphs, not decorative animations or a busy dashboard.
-
-Verify widths of **420, 640, 960 and 1440 logical pixels**, laptop half/third
-tiling, small heights, high DPI, long labels and all built-in themes. See
-[the acceptance checklist](docs/ACCEPTANCE.md).
+Docker is detected through the unprivileged `docker ps` interface. Running
+containers, images, status and published ports are shown. If the user cannot
+access Docker, NIRUSEC says so rather than requesting root unnecessarily.
 
 ## NIRUX integration
 
-- Ship as a **selected optional extra**, not a mandatory always-running desktop
-  service. Provide a standalone installer and desktop entry too.
-- NIRULAUNCHER opens NIRUSEC and relevant native views through documented CLI
-  entry points.
-- NIRUBAR gets **one icon, no permanent text**. Hide it when NIRUSEC is absent;
-  click opens the GUI; tooltip describes cached state and its age.
-- Use the theme's normal/warning/error roles. Critical policy violations use
-  the error role, normally red, together with meaningful text.
-- Send critical state transitions through **NIRUNOTIFY** using critical urgency.
-  Deduplicate them, respect notification/lock privacy and user policy, and do
-  not send another alert on every poll. Ordinary updates are not automatically
-  critical incidents.
-- Document release pins, checksums, capabilities and compatibility with the
-  existing NIRUX suite. Keep unrelated apps and desktop settings intact.
+- Responsive layout: sidebar + detail on wide screens, compact navigation and
+  one view at a time on narrow tiling layouts.
+- Active NIRUX built-in/custom theme and appearance colours, with live theme
+  changes.
+- NIRUBAR entry with a shield icon only, placed before Quick Settings. It reads
+  one shared cache and triggers at most one short-lived checker at a time.
+- NIRULAUNCHER/desktop entry through the normal application entry.
+- Critical state transitions go through NIRUNOTIFY with critical urgency. The
+  first unknown-to-critical transition is not treated as a noisy repeat, and
+  ordinary available updates are not classified as critical incidents.
 
-## Resource model
+## Safety
 
-The closed GUI should cost effectively nothing between scheduled checks.
+- The GUI runs as the normal user; only the small helper is privileged.
+- The helper accepts validated operations and explicit arguments, never a shell
+  string or arbitrary executable.
+- UFW files are backed up before safe mode; the GUI does not silently replace
+  another firewall manager.
+- Docker published ports bypass UFW. Bind them to `127.0.0.1` or the Tailscale
+  address if they should not be exposed.
+- For recovery guidance, see [Emergency access](docs/EMERGENCY.md).
 
-- Event-driven rendering; no continuous repaint loop or animated idle graphs.
-- Expensive checks belong in a short-lived, bounded scheduled checker.
-- systemd timers on Arch/Debian; an explicitly verified supported scheduling
-  mechanism on Void/runit, with clean install/remove behaviour.
-- One versioned, atomically written status cache feeds every NIRUBAR instance.
-  Each monitor must not run its own package-manager checks or parse whole logs.
-- Refresh graphs only while visible; use bounded streaming/incremental reads,
-  log rotation, command timeouts and cancellation.
-- Reap every child process, cap concurrency, avoid overlapping checks and test
-  memory/FD/thread/process behaviour over repeated operations.
-- Measure release builds including checker/helper/Xorg/compositor overhead.
-  Report observed numbers, not claims of zero CPU or guaranteed absence of bugs.
+## Current limitations
 
-## Permissions and installation
+- Firewall **profiles** are designed but not fully enabled in the GUI; see
+  [Profile design](docs/PROFILES.md).
+- Fail2ban guidance exists, but NIRUSEC does not install or automatically
+  reconfigure fail2ban yet; see [Fail2ban guidance](docs/FAIL2BAN.md).
+- UFW application profiles, arbitrary destination/interface editing and saved
+  profile snapshots are not complete.
+- Rich long-term log aggregation and every PolicyKit/update/firmware failure
+  path still need broader live coverage.
+- Docker and `fwupd` behaviour depends on the installed daemon and permissions.
+- The live acceptance record is in [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md).
 
-The GUI runs as the normal user. A small root-owned helper exposes a fixed set
-of validated operations through narrowly scoped Polkit authorization. It must
-not offer arbitrary shell execution, arbitrary file writes, or saved passwords.
+## Development
 
-Installation must provision required runtime dependencies using the correct
-package names for **Arch Linux, Debian and Void**, verify the installation,
-preserve existing firewall configuration, and support update/uninstall without
-deleting user data unexpectedly. Optional capabilities install their own
-dependencies on request and remain honest when unavailable.
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo build --release --locked
+./install.sh --build        # local development install (never on targets)
+```
 
-Installing NIRUSEC must not activate UFW, change remote access, enable telemetry
-or flash firmware automatically.
+Run the privileged helper directly only in a disposable environment:
+`NIRUSEC_HELPER=/path/to/nirusec` lets the GUI use that helper instead of
+`pkexec`.
 
-## Implementation and live testing
-
-[AGENTS.md](AGENTS.md) is the end-to-end implementation assignment, including
-architecture, authorization, dependency handling, distro-specific requirements,
-bare-metal verification, release/update responsibilities and completion gates.
-
-Operational notes:
-
-- [Emergency access](docs/EMERGENCY.md) — local console, safe mode and backup restore.
-- [Firewall profiles](docs/PROFILES.md) — proposed Off/Soft/Medium/Hard/Gaming policy.
-- [Fail2ban guidance](docs/FAIL2BAN.md) — recommended conservative configuration.
-- [UA Internt on niruxwork](docs/UA-INTERNT.md) — roaming and dual-path access.
-
-The owner will name deployment targets when pointing the agent at this repo.
-Those machines may be used to build, benchmark and test actual release binaries.
-No machine credentials belong in this repository, documentation or screenshots.
-
-## License
+- [End-to-end implementation brief](AGENTS.md)
+- [UA Internt / niruxwork roaming](docs/UA-INTERNT.md)
 
 MIT. Copyright 2026 Nicklas Rudolfsson.

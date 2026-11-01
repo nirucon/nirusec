@@ -8,10 +8,11 @@ The safe recovery path is intentionally simple and does not require a GUI.
 At the machine (or through a KVM/IPMI/serial console):
 
 ```sh
-sudo nirusec --safe-mode
+sudo /usr/local/libexec/nirusec-helper safe-mode
 ```
 
-This command:
+Run it through the installed fixed helper (or, from a development checkout,
+`sudo /home/niru/.local/bin/nirusec --safe-mode`). It:
 
 1. backs up the complete `/etc/ufw` tree under `/var/backups/nirusec/`,
 2. resets UFW to a minimal recovery policy,
@@ -21,14 +22,13 @@ This command:
 6. enables UFW.
 
 Safe mode is deliberately more open than a normal profile. Confirm the
-machine is reachable, then repair the real rules or restore a backup. It also
-works as `sudo /usr/local/libexec/nirusec-helper safe-mode` and through the
-NIRUSEC Firewall view's **Emergency safe mode** button.
+machine is reachable, then repair the real rules or restore a backup. It also works through the NIRUSEC Firewall view's **Emergency safe mode**
+button.
 
 ## Restore the previous UFW files
 
 ```sh
-sudo nirusec --restore-ufw
+sudo /usr/local/libexec/nirusec-helper restore-ufw
 ```
 
 This restores the most recent NIRUSEC backup in `/var/backups/nirusec/`,

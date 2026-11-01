@@ -11,8 +11,10 @@ Usage:
   nirusec [--open overview|firewall|ports|logs|updates|firmware|docker]
   nirusec --check [--if-stale SECONDS] [--quiet]
   nirusec --status [--json]
-  sudo nirusec --safe-mode       emergency local-console recovery
-  sudo nirusec --restore-ufw     restore the latest NIRUSEC UFW backup
+  sudo /usr/local/libexec/nirusec-helper safe-mode
+                                  emergency local-console recovery
+  sudo /usr/local/libexec/nirusec-helper restore-ufw
+                                  restore the latest NIRUSEC UFW backup
   nirusec --version
 
 The checker writes a versioned cache for NIRUBAR and other suite components.
