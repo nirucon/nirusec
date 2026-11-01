@@ -114,3 +114,18 @@ authentication and destructive update/firmware paths were not exercised.
 
 The additional workplace Wi-Fi workflow was not exercised in this pass. Device
 firmware flashing, package upgrades and fail2ban changes were not performed.
+
+## 0.1.7 profile/PolicyKit pass — 2026-11-01
+
+- `pkexec`/PolicyKit is now a documented installer dependency and is present on
+  all six machines. The earlier rule-load failure was a missing `pkexec`.
+- NIRUSEC 0.1.7 with Off/Soft/Medium/Hard/Gaming profiles is installed on all
+  six machines.
+- Soft profile apply → new SSH through Tailscale → confirm → restore previous
+  UFW files was exercised on `niruxwork`. The 120-second automatic rollback
+  watchdog is armed by the same apply path; the full two-minute timeout was not
+  waited for in this pass.
+- Current `niruxwork` custom rules, including its USB Wi-Fi interface rule,
+  were restored after the test. Home-LAN and Tailscale access remained usable.
+- Workplace-network documentation was removed from the public repository; no
+  current public file names the private network.
