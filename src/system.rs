@@ -88,14 +88,18 @@ pub fn command_exists(program: &str) -> bool {
     if program.contains('/') {
         return Path::new(program).is_file();
     }
-    std::env::var_os("PATH")
+    let in_path = std::env::var_os("PATH")
         .map(|paths| {
             std::env::split_paths(&paths).any(|path| {
                 let candidate = path.join(program);
                 candidate.is_file()
             })
         })
-        .unwrap_or(false)
+        .unwrap_or(false);
+    in_path
+        || ["/usr/sbin", "/sbin", "/usr/local/sbin"]
+            .iter()
+            .any(|dir| Path::new(dir).join(program).is_file())
 }
 
 fn read_key_file(path: &str) -> HashMap<String, String> {

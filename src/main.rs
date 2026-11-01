@@ -46,8 +46,10 @@ fn print_status(status: &Status, json: bool) {
 }
 
 fn notify_if_needed(previous: Option<&Status>, current: &Status) {
-    let was_critical = previous.is_some_and(|status| status.state == "critical");
-    if current.state != "critical" || was_critical {
+    let Some(previous) = previous else {
+        return;
+    };
+    if current.state != "critical" || previous.state == "critical" {
         return;
     }
     let _ = std::process::Command::new("notify-send")
