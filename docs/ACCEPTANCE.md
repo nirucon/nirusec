@@ -178,3 +178,14 @@ as 0.1.8. Existing UFW states and rules were preserved. No reboot or logout was
 needed for NIRUSEC. The previously running NIRUSEC GUI on `niruxwork` was
 restarted so it would load the new binary and show the active-profile banner.
 The current recorded state there is Custom after the live rule test.
+
+### PolicyKit session check after 0.1.8
+
+The first live GUI test on `niruxwork` was launched by a detached SSH command.
+It landed in an SSH `user` session without a seat, so PolicyKit correctly denied
+the inactive session with `Error executing command as another user: Not authorized`.
+After restarting the GUI inside the active `seat0` X11 session and moving it to
+that session's cgroup, the same helper operation authenticated through `lxpolkit`
+and returned the expected `ufw-status` result. Launch NIRUSEC from the desktop,
+NIRUBAR or another process owned by the active graphical session; a detached SSH
+launch is not a supported PolicyKit context.
