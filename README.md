@@ -158,6 +158,5 @@ Run the privileged helper directly only in a disposable environment:
 `pkexec`.
 
 - [End-to-end implementation brief](AGENTS.md)
-- [UA Internt / niruxwork roaming](docs/UA-INTERNT.md)
 
 MIT. Copyright 2026 Nicklas Rudolfsson.

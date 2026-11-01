@@ -103,7 +103,7 @@ authentication and destructive update/firmware paths were not exercised.
 
 - NIRUSEC 0.1.5 is installed on all six owner machines.
 - `niruxwork`: UFW active with loopback, `tailscale0`, `virbr0`, home-LAN
-  SSH/DHCP, Tailscale direct UDP 41641 and the UA Internt USB Wi-Fi SSH/DHCP
+  SSH/DHCP, Tailscale direct UDP 41641 and an additional USB Wi-Fi SSH/DHCP
   interface rule.
 - A real safe-mode/restore cycle was performed on `niruxwork`: UFW was backed
   up to `/var/backups/nirusec/ufw-*`, safe mode made SSH and Tailscale reachable,
@@ -112,6 +112,5 @@ authentication and destructive update/firmware paths were not exercised.
   after enabling UFW; NIRUSHARE's Tailscale port was reachable.
 - No zombies were observed during the final checks.
 
-The UA Internt workflow (`ua-net up --dhcp` / `--primary`, interface-scoped SSH)
-is documented but was not exercised at the workplace in this pass. Device
+The additional workplace Wi-Fi workflow was not exercised in this pass. Device
 firmware flashing, package upgrades and fail2ban changes were not performed.
