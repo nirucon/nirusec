@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+<policyconfig>
+  <vendor>NIRU</vendor>
+  <action id="se.nirucon.nirusec.manage">
+    <description>Manage firewall, updates and firmware</description>
+    <message>Authentication is required to change system security settings or packages.</message>
+    <defaults>
+      <allow_active>auth_admin_keep</allow_active>
+      <allow_inactive>no</allow_inactive>
+    </defaults>
+    <annotations>
+      <annotation key="org.freedesktop.policykit.exec.path" value="/usr/local/libexec/nirusec-helper"/>
+    </annotations>
+  </action>
+</policyconfig>

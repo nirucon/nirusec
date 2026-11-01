@@ -1,0 +1,36 @@
+name: Release
+on:
+  push: { tags: ['v*'] }
+permissions: { contents: write }
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt, clippy }
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgl1-mesa-dev
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Identity
+        run: test "$(./target/release/nirusec --version | awk '{print $2}')" = "${GITHUB_REF_NAME#v}"
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/nirusec install.sh uninstall.sh dist/
+          cp -R assets dist/
+          (cd dist && tar -czf "nirusec-${GITHUB_REF_NAME#v}-x86_64-linux-gnu.tar.gz" nirusec install.sh uninstall.sh assets)
+          cd dist && sha256sum nirusec *.tar.gz install.sh uninstall.sh assets/* > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          make_latest: true
+          files: |
+            dist/nirusec
+            dist/nirusec-*-x86_64-linux-gnu.tar.gz
+            dist/install.sh
+            dist/uninstall.sh
+            dist/assets/*
+            dist/SHA256SUMS
+          generate_release_notes: true

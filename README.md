@@ -7,14 +7,42 @@ quiet, responsive interface that follows the active NIRUX theme.
 
 ## Project status
 
-**Specification repository — the application is not implemented yet.**
-This repository contains the product brief and implementation instructions.
-There is no installable release, working installer or completed security audit.
-The next implementation agent should read [AGENTS.md](AGENTS.md) and build the
-product through live validation, packaging and deployment on the machines the
-owner explicitly names for that implementation session.
+**0.1.0 core implementation.** A single Rust binary provides the themed GUI and
+a locked-down `--helper` mode used by PolicyKit. It includes the overview,
+firewall rule management, listening ports, logs, package updates, firmware
+recommendations, fwupd discovery and Docker containers. Live acceptance on all
+owner machines is recorded in the release/deployment notes; missing privileges,
+unsupported firmware and unavailable package metadata are shown explicitly
+rather than guessed.
 
-## What NIRUSEC should do
+The remaining work is hardening and breadth, not a scaffold: more UFW syntax
+coverage, richer log retention/aggregation, connectivity rollback test coverage
+on every distro, and a completed live acceptance matrix. Do not treat this
+README as a claim of zero bugs or a completed independent security audit.
+
+## Install
+
+Use NIRUX for the suite integration, or install the release without compiling
+anything on the target:
+
+```sh
+curl -fLO https://github.com/nirucon/nirusec/releases/latest/download/nirusec
+chmod +x nirusec
+# use the release install.sh beside the assets, or install the binary as below
+```
+
+The release is one x86_64 glibc binary. It supports both GUI and root helper
+modes; the installer copies that same file to the fixed root-owned helper path
+and installs the PolicyKit action. The installer downloads the prebuilt release
+by default; `--build` is only for development. Installation never enables UFW
+or flashes firmware.
+
+```sh
+./install.sh             # prebuilt binary, no local Rust build
+./install.sh --build     # development checkout only
+```
+
+## What NIRUSEC does
 
 ### Overview
 

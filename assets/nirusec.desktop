@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=NIRUSEC
+Comment=Firewall, updates, firmware and system security overview
+Exec=nirusec
+Icon=nirusec
+Terminal=false
+Categories=System;Security;Settings;
+Keywords=security;firewall;ufw;updates;firmware;ports;
+StartupNotify=false

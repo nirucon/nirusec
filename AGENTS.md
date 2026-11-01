@@ -15,9 +15,10 @@ implemented, automatically tested and live-verified behaviour.
 
 ## Current starting state
 
-This repository initially contains only documentation. README.md describes
-planned features, not working software. Keep the project status honest as work
-progresses. Replace provisional commands with tested install/run instructions.
+The 0.1.0 core implementation is present in this repository. It is the starting
+baseline, not a claim of completed acceptance: continue with hardening, missing
+edge cases, live matrix verification and the deployment gates below. Keep the
+project status honest as work progresses.
 
 Read this file, README.md and docs/ACCEPTANCE.md before editing. Check local
 changes, repository status, branch and existing releases before proceeding.
