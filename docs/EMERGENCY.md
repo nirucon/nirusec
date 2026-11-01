@@ -14,7 +14,8 @@ sudo /usr/local/libexec/nirusec-helper safe-mode
 Run it through the installed fixed helper (or, from a development checkout,
 `sudo /home/niru/.local/bin/nirusec --safe-mode`). It:
 
-1. backs up the complete `/etc/ufw` tree under `/var/backups/nirusec/`,
+1. backs up the complete `/etc/ufw` tree and `/etc/default/ufw` under
+   `/var/backups/nirusec/`,
 2. resets UFW to a minimal recovery policy,
 3. allows loopback and `tailscale0`,
 4. allows SSH on port 22 so the machine can be reached again,
@@ -32,8 +33,10 @@ sudo /usr/local/libexec/nirusec-helper restore-ufw
 ```
 
 This restores the most recent NIRUSEC backup in `/var/backups/nirusec/`,
-disabling UFW while the files are copied and enabling it again. Backups are
-root-only and never written to Git or the user state directory.
+including `/etc/default/ufw`. UFW is disabled while files are copied and then
+returned to the enabled state recorded in the backup. A previously disabled
+firewall is not silently enabled. Backups are root-only and never written to Git
+or the user state directory.
 
 ## If Tailscale or SSH is the problem
 

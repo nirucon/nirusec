@@ -36,6 +36,42 @@ pub struct FirewallStatus {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfileStatus {
+    pub id: String,
+    pub label: String,
+    pub state: String,
+    pub applied_at: i64,
+    pub confirmed_at: i64,
+    pub expires_at: i64,
+    pub pending_token: Option<String>,
+    pub changed_after: bool,
+    pub message: String,
+}
+
+impl Default for ProfileStatus {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            label: "Custom".into(),
+            state: "custom".into(),
+            applied_at: 0,
+            confirmed_at: 0,
+            expires_at: 0,
+            pending_token: None,
+            changed_after: false,
+            message: String::new(),
+        }
+    }
+}
+
+impl ProfileStatus {
+    pub fn pending(&self) -> bool {
+        self.state == "pending" && self.pending_token.is_some()
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpdatesStatus {
@@ -48,14 +84,27 @@ pub struct UpdatesStatus {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
+pub struct FirmwareDevice {
+    pub id: String,
+    pub name: String,
+    pub current_version: String,
+    pub new_version: String,
+    pub flags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FirmwareStatus {
     pub manager: String,
     pub recommended: Vec<String>,
     pub missing: Vec<String>,
+    pub unknown: Vec<String>,
     pub microcode_missing: bool,
     pub fwupd_available: bool,
     pub fwupd_summary: String,
     pub fwupd_updates: bool,
+    pub fwupd_error: Option<String>,
+    pub devices: Vec<FirmwareDevice>,
     pub error: Option<String>,
 }
 
@@ -71,6 +120,7 @@ pub struct DockerContainer {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DockerStatus {
+    pub installed: bool,
     pub available: bool,
     pub containers: Vec<DockerContainer>,
     pub error: Option<String>,
@@ -91,6 +141,8 @@ pub struct LogEntry {
 pub struct LogsStatus {
     pub available: bool,
     pub source: String,
+    pub window: String,
+    pub truncated: bool,
     pub blocked: u32,
     pub allowed: u32,
     pub top: Vec<LogEntry>,
@@ -106,6 +158,7 @@ pub struct Status {
     pub state: String,
     pub summary: String,
     pub firewall: FirewallStatus,
+    pub profile: ProfileStatus,
     pub ports: Vec<Port>,
     pub updates: UpdatesStatus,
     pub firmware: FirmwareStatus,

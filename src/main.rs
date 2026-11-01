@@ -33,6 +33,15 @@ fn print_status(status: &Status, json: bool) {
         println!("summary: {}", status.summary);
         println!("checked_at: {}", status.checked_at);
         println!("firewall: {:?}", status.firewall.enabled);
+        println!(
+            "profile: {} ({})",
+            if status.profile.label.is_empty() {
+                "Custom"
+            } else {
+                &status.profile.label
+            },
+            status.profile.state
+        );
         println!("listening ports: {}", status.ports.len());
         println!(
             "updates: {} ({})",

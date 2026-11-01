@@ -8,7 +8,7 @@ blocked traffic, package updates, CPU microcode, firmware and running Docker
 containers. It follows the active NIRUX theme and works in narrow tiling
 layouts as well as large windows.
 
-**Current release: 0.1.7.** It is a working core, not an independent security
+**Current release: 0.1.8.** It is a working core, not an independent security
 audit. The limitations at the bottom are deliberate and visible in the UI.
 
 ## Install
@@ -28,13 +28,14 @@ artifact to the fixed root-owned helper path and installs the PolicyKit action.
 Standalone release installation:
 
 ```sh
-tar -xzf nirusec-0.1.7-x86_64-linux-gnu.tar.gz
-cd nirusec-0.1.7
-sudo ./install.sh
+tar -xzf nirusec-0.1.8-x86_64-linux-gnu.tar.gz
+./install.sh
 ```
 
-`./install.sh` downloads the published binary by default. `--build` is only for
-development checkouts. Installation installs UFW as a dependency but **does not
+Run the installer as your desktop user, not with `sudo`; it requests sudo only
+for the fixed root helper and PolicyKit action. `./install.sh` uses the verified
+binary in the archive. Without a binary it downloads the published release and
+checks `SHA256SUMS`. Installation installs UFW as a dependency but **does not
 enable it** and never flashes firmware.
 
 ## Use
@@ -62,8 +63,14 @@ as a fresh green result.
 
 - Read UFW enabled state and default policies.
 - Load the actual numbered rules after an explicit PolicyKit authentication.
-- Apply Off/Soft/Medium/Hard/Gaming presets with a 120-second confirmation
-  window and automatic rollback.
+- Show the **active profile** on every view: verified, pending, changed, custom
+  or intentionally off.
+- Apply Off/Soft/Medium/Hard/Gaming presets with a global 120-second countdown,
+  **Keep this profile** and **Restore previous** actions.
+- The root-owned transaction backs up `/etc/ufw` and `/etc/default/ufw`, records
+  whether UFW was enabled, and arms the rollback timer before applying rules.
+  Automatic rollback restores that exact backup and never turns on a firewall
+  that was previously disabled.
 - Enable/disable UFW.
 - Add a validated incoming rule: allow/limit/deny/reject, TCP/UDP, port or
   range, optional IP/CIDR source and comment.
@@ -135,7 +142,9 @@ access Docker, NIRUSEC says so rather than requesting root unnecessarily.
 ## Current limitations
 
 - Firewall profiles are implemented with a 120-second rollback window; see
-  [Profile design](docs/PROFILES.md).
+  [Profile design](docs/PROFILES.md). The active-profile display is based on
+  the last NIRUSEC transaction plus UFW file timestamps; a configuration edited
+  outside NIRUSEC is reported as changed/custom rather than guessed.
 - Fail2ban guidance exists, but NIRUSEC does not install or automatically
   reconfigure fail2ban yet; see [Fail2ban guidance](docs/FAIL2BAN.md).
 - UFW application profiles, arbitrary destination/interface editing and saved

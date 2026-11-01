@@ -13,7 +13,7 @@ use std::{
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, Sender},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,7 +62,7 @@ struct RuleForm {
     comment: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum ConfirmKind {
     EnableFirewall,
     DisableFirewall,
@@ -72,6 +72,7 @@ enum ConfirmKind {
     DeleteRule(u32),
     SafeMode,
     ApplyProfile(&'static str),
+    RollbackProfile(String),
 }
 
 struct Confirm {
@@ -98,8 +99,9 @@ pub struct NirusecApp {
     rules_loaded: bool,
     form: RuleForm,
     confirm: Option<Confirm>,
-    profile_token: Option<String>,
-    started: Instant,
+    selected_firmware: Option<String>,
+    profile: ProfileStatus,
+    last_profile_poll: Instant,
 }
 
 impl NirusecApp {
@@ -125,9 +127,13 @@ impl NirusecApp {
                 comment: String::new(),
             },
             confirm: None,
-            profile_token: None,
-            started: Instant::now(),
+            selected_firmware: None,
+            profile: profiles::read_status(),
+            last_profile_poll: Instant::now(),
         };
+        if app.status.checked_at == 0 {
+            app.profile = app.status.profile.clone();
+        }
         if app.status.checked_at == 0 || cache::age_seconds(&app.status) > 300 {
             app.refresh_status(&cc.egui_ctx);
         }
@@ -141,15 +147,18 @@ impl NirusecApp {
         self.busy = true;
         let tx = self.tx.clone();
         let ctx = ctx.clone();
-        thread::Builder::new()
+        let result = thread::Builder::new()
             .name("nirusec-status".into())
             .spawn(move || {
                 let status = system::collect();
                 let _ = cache::write(&status);
                 let _ = tx.send(Job::Status(Box::new(Ok(status))));
                 ctx.request_repaint();
-            })
-            .ok();
+            });
+        if let Err(error) = result {
+            self.busy = false;
+            self.message = Some((format!("cannot start status check: {error}"), true));
+        }
     }
 
     fn run_helper(&mut self, ctx: &Context, op: &'static str, args: Vec<String>) {
@@ -160,7 +169,7 @@ impl NirusecApp {
         self.message = Some((format!("Running {op}…"), false));
         let tx = self.tx.clone();
         let ctx = ctx.clone();
-        thread::Builder::new()
+        let result = thread::Builder::new()
             .name("nirusec-helper".into())
             .spawn(move || {
                 let mut command = if let Ok(path) = std::env::var("NIRUSEC_HELPER") {
@@ -191,8 +200,11 @@ impl NirusecApp {
                 };
                 let _ = tx.send(Job::Helper(result));
                 ctx.request_repaint();
-            })
-            .ok();
+            });
+        if let Err(error) = result {
+            self.busy = false;
+            self.message = Some((format!("cannot start privileged operation: {error}"), true));
+        }
     }
 
     fn load_rules(&mut self, ctx: &Context) {
@@ -205,6 +217,52 @@ impl NirusecApp {
             "warning" => pal.warning,
             "ok" => pal.success,
             _ => pal.disabled,
+        }
+    }
+
+    fn profile_color(&self, pal: &Palette) -> Color32 {
+        match self.profile.state.as_str() {
+            "kept" if self.profile.id == "off" => pal.warning,
+            "kept" => pal.success,
+            "pending" | "expired" | "changed" => pal.warning,
+            "rollback_failed" => pal.error,
+            _ => pal.disabled,
+        }
+    }
+
+    fn profile_text(&self) -> String {
+        let label = if self.profile.label.is_empty() {
+            "Custom"
+        } else {
+            &self.profile.label
+        };
+        match self.profile.state.as_str() {
+            "kept" => format!("Active profile: {label}"),
+            "pending" => format!("Pending profile: {label}"),
+            "expired" => format!("Pending profile: {label} · overdue"),
+            "changed" => format!("Active policy: Custom · {label} changed"),
+            "rolled_back" => "Active profile: Custom · previous restored".into(),
+            "rollback_failed" => format!("Active policy: {label} rollback failed"),
+            _ => "Active profile: Custom".into(),
+        }
+    }
+
+    fn profile_remaining(&self) -> i64 {
+        self.profile.expires_at - cache::now()
+    }
+
+    fn profile_state_detail(&self) -> &'static str {
+        match self.profile.state.as_str() {
+            "kept" if self.profile.id == "off" => "Intentionally disabled by the Off profile.",
+            "kept" => "Verified as the current NIRUSEC-managed profile.",
+            "pending" => "Rollback is armed. Keep this profile or restore the previous one.",
+            "expired" => "The confirmation window expired.",
+            "changed" => "UFW files changed after confirmation; treat the policy as custom.",
+            "rolled_back" => "The previous firewall configuration was restored.",
+            "rollback_failed" => {
+                "Automatic rollback failed; inspect the firewall before disconnecting."
+            }
+            _ => "No NIRUSEC-managed profile is recorded.",
         }
     }
 
@@ -227,7 +285,15 @@ impl NirusecApp {
             self.busy = false;
             match job {
                 Job::Status(result) => match *result {
-                    Ok(status) => {
+                    Ok(mut status) => {
+                        if self.rules_loaded
+                            && status.firewall.rules.is_empty()
+                            && !self.status.firewall.rules.is_empty()
+                        {
+                            status.firewall.rules = self.status.firewall.rules.clone();
+                            status.firewall.rules_available = true;
+                        }
+                        self.profile = status.profile.clone();
                         self.status = status;
                         self.message = None;
                     }
@@ -237,6 +303,7 @@ impl NirusecApp {
                 },
                 Job::Helper(result) => match result {
                     Ok(response) => {
+                        self.profile = profiles::read_status();
                         if !response.ok {
                             self.message = Some((response.message, true));
                         } else {
@@ -246,18 +313,19 @@ impl NirusecApp {
                                 self.status.firewall.rules_available = true;
                                 self.rules_loaded = true;
                             }
-                            if response.token.is_some() {
-                                self.profile_token = response.token;
-                            }
                             self.message = Some((response.message, false));
                             if let Some(output) = response.output {
                                 if output.lines().count() > 1 {
-                                    // Keep the UI compact; full package-manager
-                                    // output remains available through the logs.
+                                    // Keep full command output available to the
+                                    // terminal, but do not hide the GUI result.
                                     eprintln!("nirusec helper: {output}");
                                 }
                             }
-                            self.refresh_status(ctx);
+                            // A profile apply arms a short confirmation window.
+                            // Do not spend that window on a full status refresh.
+                            if response.token.is_none() {
+                                self.refresh_status(ctx);
+                            }
                         }
                     }
                     Err(error) => self.message = Some((error, true)),
@@ -267,7 +335,7 @@ impl NirusecApp {
     }
 
     fn header(&mut self, ui: &mut Ui, ctx: &Context, pal: &Palette) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(
                 RichText::new("NIRUSEC")
                     .strong()
@@ -294,15 +362,84 @@ impl NirusecApp {
                     .color(pal.disabled)
                     .size(11.0),
             );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add_enabled(!self.busy, Button::new("Refresh")).clicked() {
-                    self.refresh_status(ctx);
-                }
-                if self.status.state == "critical" {
-                    ui.label(RichText::new("Needs attention").color(pal.error).strong());
+            if self.status.state == "critical" {
+                ui.label(RichText::new("Needs attention").color(pal.error).strong());
+            }
+            if ui.add_enabled(!self.busy, Button::new("Refresh")).clicked() {
+                self.refresh_status(ctx);
+            }
+        });
+    }
+
+    fn profile_banner(&mut self, ui: &mut Ui, ctx: &Context, pal: &Palette) {
+        let pending = matches!(
+            self.profile.state.as_str(),
+            "pending" | "expired" | "rollback_failed"
+        );
+        let color = self.profile_color(pal);
+        Frame::none()
+            .fill(pal.panel)
+            .stroke(Stroke::new(1.0_f32, color))
+            .rounding(6.0)
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(self.profile_text())
+                            .color(color)
+                            .strong()
+                            .size(12.0),
+                    );
+                    ui.label(
+                        RichText::new(self.profile_state_detail())
+                            .color(pal.muted)
+                            .size(10.0),
+                    );
+                });
+                if pending {
+                    let remaining = self.profile_remaining();
+                    ui.horizontal_wrapped(|ui| {
+                        if remaining > 0 {
+                            ui.label(
+                                RichText::new(format!("Rollback in {remaining}s"))
+                                    .color(pal.warning)
+                                    .strong(),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new("Rollback window expired")
+                                    .color(pal.error)
+                                    .strong(),
+                            );
+                        }
+                        if remaining > 0
+                            && ui
+                                .add_enabled(
+                                    !self.busy,
+                                    Button::new("Keep this profile").fill(pal.accent),
+                                )
+                                .clicked()
+                        {
+                            if let Some(token) = self.profile.pending_token.clone() {
+                                self.run_helper(ctx, "profile-confirm", vec![token]);
+                            }
+                        }
+                        if ui
+                            .add_enabled(!self.busy, Button::new("Restore previous"))
+                            .clicked()
+                        {
+                            if let Some(token) = self.profile.pending_token.clone() {
+                                self.confirm = Some(Confirm {
+                                    kind: ConfirmKind::RollbackProfile(token),
+                                    title: "Restore the previous firewall?".into(),
+                                    body: "The exact backup for this profile transaction will be restored now. UFW will return to its earlier enabled state.".into(),
+                                    action: "restore-transaction",
+                                });
+                            }
+                        }
+                    });
                 }
             });
-        });
     }
 
     fn nav(&mut self, ui: &mut Ui, pal: &Palette, wide: bool) {
@@ -432,7 +569,11 @@ impl NirusecApp {
             (
                 "Firewall",
                 firewall,
-                format!("{} listening port(s)", self.status.ports.len()),
+                format!(
+                    "{} · {} listening port(s)",
+                    self.profile_text(),
+                    self.status.ports.len()
+                ),
             ),
             (
                 "Updates",
@@ -531,43 +672,106 @@ impl NirusecApp {
             ))
             .color(pal.muted),
         );
-        if let Some(token) = self.profile_token.clone() {
-            Frame::none()
-                .fill(pal.panel)
-                .stroke(Stroke::new(1.0_f32, pal.warning))
-                .rounding(6.0)
-                .inner_margin(10.0)
-                .show(ui, |ui| {
-                    ui.label(RichText::new("Profile applied — rollback is armed").strong().color(pal.warning));
-                    ui.label(RichText::new("Confirm within 120 seconds or the previous firewall returns. Test a new SSH connection first.").color(pal.muted).size(11.0));
-                    if ui.add_enabled(!self.busy, Button::new("Keep this profile")).clicked() {
-                        self.run_helper(ctx, "profile-confirm", vec![token.clone()]);
-                        self.profile_token = None;
-                    }
-                });
-            ui.add_space(8.0);
-        }
-        ui.label(RichText::new("Profiles").strong());
-        ui.horizontal_wrapped(|ui| {
-            for (id, label, description) in [
-                ("off", "Off", profiles::Profile::Off.description()),
-                ("soft", "Soft", profiles::Profile::Soft.description()),
-                ("medium", "Medium", profiles::Profile::Medium.description()),
-                ("hard", "Hard", profiles::Profile::Hard.description()),
-                ("gaming", "Gaming", profiles::Profile::Gaming.description()),
-            ] {
-                let button = Button::new(label).fill(if id == "off" { pal.error } else { pal.surface });
-                if ui.add_enabled(!self.busy, button).on_hover_text(description).clicked() {
-                    self.confirm = Some(Confirm {
-                        kind: ConfirmKind::ApplyProfile(id),
-                        title: format!("Apply {label} firewall profile?"),
-                        body: format!("{description}\n\nThe current UFW files are backed up. You must confirm within 120 seconds or the previous firewall returns."),
-                        action: "profile-apply",
-                    });
+        Frame::none()
+            .fill(pal.panel)
+            .stroke(Stroke::new(1.0_f32, self.profile_color(pal)))
+            .rounding(6.0)
+            .inner_margin(10.0)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(self.profile_text())
+                        .strong()
+                        .size(15.0)
+                        .color(self.profile_color(pal)),
+                );
+                ui.label(
+                    RichText::new(self.profile_state_detail())
+                        .color(pal.muted)
+                        .size(10.0),
+                );
+                if matches!(self.profile.state.as_str(), "pending" | "expired") {
+                    let remaining = self.profile_remaining();
+                    ui.label(
+                        RichText::new(if remaining > 0 {
+                            format!("Confirmation window: {remaining}s remaining")
+                        } else {
+                            "Confirmation window expired".into()
+                        })
+                        .color(if remaining > 0 {
+                            pal.warning
+                        } else {
+                            pal.error
+                        }),
+                    );
                 }
-            }
-        });
-        ui.label(RichText::new("Profiles reset UFW to a deterministic policy. Test a new SSH session before closing your current one.").color(pal.disabled).size(11.0));
+            });
+        ui.add_space(8.0);
+        ui.label(RichText::new("Profiles").strong());
+        ui.label(
+            RichText::new("Profiles reset UFW to a deterministic policy. Test a new SSH session before closing your current one.")
+                .color(pal.disabled)
+                .size(11.0),
+        );
+        for (id, label, description) in [
+            ("off", "Off", profiles::Profile::Off.description()),
+            ("soft", "Soft", profiles::Profile::Soft.description()),
+            ("medium", "Medium", profiles::Profile::Medium.description()),
+            ("hard", "Hard", profiles::Profile::Hard.description()),
+            ("gaming", "Gaming", profiles::Profile::Gaming.description()),
+        ] {
+            let active = self.profile.id == id
+                && matches!(self.profile.state.as_str(), "kept")
+                && !self.profile.changed_after;
+            let pending = self.profile.id == id
+                && matches!(self.profile.state.as_str(), "pending" | "expired");
+            let title = if active {
+                format!("{label} · ACTIVE")
+            } else if pending {
+                format!("{label} · PENDING")
+            } else {
+                label.to_string()
+            };
+            Frame::none()
+                .fill(if active { pal.panel } else { pal.surface })
+                .stroke(Stroke::new(
+                    1.0_f32,
+                    if active {
+                        self.profile_color(pal)
+                    } else {
+                        pal.border
+                    },
+                ))
+                .rounding(4.0)
+                .inner_margin(6.0)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        let button = Button::new(title).fill(if id == "off" {
+                            pal.error
+                        } else if active {
+                            pal.accent
+                        } else {
+                            pal.surface
+                        });
+                        if ui
+                            .add_enabled(!self.busy && !self.profile.pending(), button)
+                            .clicked()
+                        {
+                            self.confirm = Some(Confirm {
+                                kind: ConfirmKind::ApplyProfile(id),
+                                title: format!("Apply {label} firewall profile?"),
+                                body: format!("{description}\n\nThe current UFW files are backed up. You must confirm within 120 seconds or the previous firewall returns."),
+                                action: "profile-apply",
+                            });
+                        }
+                        ui.label(
+                            RichText::new(description)
+                                .color(pal.muted)
+                                .size(10.0),
+                        );
+                    });
+                });
+            ui.add_space(3.0);
+        }
         ui.add_space(8.0);
         let enabled = self.status.firewall.enabled;
         ui.horizontal_wrapped(|ui| {
@@ -734,15 +938,15 @@ impl NirusecApp {
                             .monospace()
                             .color(pal.foreground),
                         );
-                        ui.label(RichText::new(&port.scope).color(
-                            if port.scope == "all interfaces" {
-                                pal.warning
-                            } else if port.scope == "Tailscale" {
-                                pal.accent
-                            } else {
-                                pal.muted
-                            },
-                        ));
+                        ui.label(RichText::new(&port.scope).color(if port.scope == "public" {
+                            pal.error
+                        } else if port.scope == "all interfaces" {
+                            pal.warning
+                        } else if port.scope == "Tailscale" {
+                            pal.accent
+                        } else {
+                            pal.muted
+                        }));
                     });
                 });
         }
@@ -751,10 +955,20 @@ impl NirusecApp {
     fn logs(&mut self, ui: &mut Ui, pal: &Palette) {
         ui.heading("Firewall logs");
         ui.label(
-            RichText::new(format!("Source: {}", self.status.logs.source))
-                .color(pal.muted)
-                .size(11.0),
+            RichText::new(format!(
+                "Source: {} · {}",
+                self.status.logs.source, self.status.logs.window
+            ))
+            .color(pal.muted)
+            .size(11.0),
         );
+        if self.status.logs.truncated {
+            ui.label(
+                RichText::new("Only the end of a large log file was read.")
+                    .color(pal.warning)
+                    .size(10.0),
+            );
+        }
         if !self.status.logs.available {
             ui.label(
                 RichText::new(
@@ -897,6 +1111,16 @@ impl NirusecApp {
                 self.confirm = Some(Confirm { kind: ConfirmKind::InstallFirmware, title: "Install recommended firmware?".into(), body: "This installs the listed distribution packages only. It does not flash a device.".into(), action: "firmware-install" });
             }
         }
+        if !self.status.firmware.unknown.is_empty() {
+            ui.label(
+                RichText::new(
+                    "Package state could not be verified for: ".to_string()
+                        + &self.status.firmware.unknown.join(", "),
+                )
+                .color(pal.warning)
+                .size(11.0),
+            );
+        }
         ui.add_space(8.0);
         Frame::none().fill(pal.surface).stroke(Stroke::new(1.0_f32, pal.border)).rounding(6.0).inner_margin(10.0).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -905,8 +1129,59 @@ impl NirusecApp {
             });
             if self.status.firmware.fwupd_available {
                 ui.label(RichText::new(&self.status.firmware.fwupd_summary).color(pal.muted).size(11.0));
-                if ui.add_enabled(!self.busy && self.status.firmware.fwupd_updates, Button::new("Install device firmware…")).clicked() {
-                    self.confirm = Some(Confirm { kind: ConfirmKind::UpdateFirmware, title: "Install device firmware?".into(), body: "fwupd will flash supported devices. Connect power, close other work and allow the required reboot. Do not interrupt the process.".into(), action: "firmware-update" });
+                if let Some(error) = &self.status.firmware.fwupd_error {
+                    ui.label(RichText::new(error).color(pal.warning).size(11.0));
+                }
+                for device in &self.status.firmware.devices {
+                    Frame::none()
+                        .fill(pal.panel)
+                        .stroke(Stroke::new(1.0_f32, pal.border))
+                        .rounding(4.0)
+                        .inner_margin(6.0)
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(&device.name).strong().color(pal.foreground));
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} → {}",
+                                    if device.current_version.is_empty() {
+                                        "unknown"
+                                    } else {
+                                        &device.current_version
+                                    },
+                                    if device.new_version.is_empty() {
+                                        "available"
+                                    } else {
+                                        &device.new_version
+                                    }
+                                ))
+                                .monospace()
+                                .size(10.0)
+                                .color(pal.muted),
+                            );
+                            if ui
+                                .add_enabled(
+                                    !self.busy,
+                                    Button::new("Install this device update…"),
+                                )
+                                .clicked()
+                            {
+                                self.confirm = Some(Confirm {
+                                    kind: ConfirmKind::UpdateFirmware,
+                                    title: "Install this device firmware?".into(),
+                                    body: format!(
+                                        "fwupd will flash {} ({} → {}). Connect power, close other work and allow the required reboot. Do not interrupt the process.",
+                                        device.name,
+                                        if device.current_version.is_empty() { "unknown" } else { &device.current_version },
+                                        if device.new_version.is_empty() { "available" } else { &device.new_version }
+                                    ),
+                                    action: "firmware-update",
+                                });
+                                self.selected_firmware = Some(device.id.clone());
+                            }
+                        });
+                }
+                if self.status.firmware.devices.is_empty() {
+                    ui.label(RichText::new("No supported device updates are available.").color(pal.disabled));
                 }
             } else {
                 ui.label(RichText::new("Install fwupd from the distribution to manage supported BIOS/device updates.").color(pal.disabled));
@@ -987,7 +1262,7 @@ impl NirusecApp {
                         close = true;
                     }
                     if ui.add(Button::new("Apply").fill(pal.accent)).clicked() {
-                        run = Some((confirm.kind, confirm.action));
+                        run = Some((confirm.kind.clone(), confirm.action));
                     }
                 });
             });
@@ -1001,14 +1276,28 @@ impl NirusecApp {
                     self.run_helper(ctx, action, Vec::new());
                 }
                 ConfirmKind::DeleteRule(number) => {
-                    self.run_helper(ctx, "ufw-delete", vec![number.to_string()]);
+                    let expected = self
+                        .status
+                        .firewall
+                        .rules
+                        .iter()
+                        .find(|rule| rule.number == number)
+                        .map(|rule| rule.raw.clone())
+                        .unwrap_or_default();
+                    self.run_helper(ctx, "ufw-delete", vec![number.to_string(), expected]);
                 }
                 ConfirmKind::ApplyProfile(profile) => {
                     self.run_helper(ctx, "profile-apply", vec![profile.to_string()]);
                 }
+                ConfirmKind::RollbackProfile(token) => {
+                    self.run_helper(ctx, "restore-transaction", vec![token]);
+                }
+                ConfirmKind::UpdateFirmware => {
+                    let device = self.selected_firmware.take();
+                    self.run_helper(ctx, "firmware-update", device.into_iter().collect());
+                }
                 ConfirmKind::UpdatePackages
                 | ConfirmKind::InstallFirmware
-                | ConfirmKind::UpdateFirmware
                 | ConfirmKind::SafeMode => {
                     self.run_helper(ctx, action, Vec::new());
                 }
@@ -1024,11 +1313,22 @@ impl eframe::App for NirusecApp {
             theme::apply(ctx, &self.theme);
         }
         self.process_jobs(ctx);
+        if self.profile.pending()
+            || matches!(self.profile.state.as_str(), "expired" | "rollback_failed")
+        {
+            if self.last_profile_poll.elapsed() >= Duration::from_secs(1) {
+                self.last_profile_poll = Instant::now();
+                self.profile = profiles::read_status();
+            }
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
         let pal = self.theme.palette.clone();
         egui::CentralPanel::default()
             .frame(Frame::none().fill(pal.background).inner_margin(14.0))
             .show(ctx, |ui| {
                 self.header(ui, ctx, &pal);
+                ui.add_space(6.0);
+                self.profile_banner(ui, ctx, &pal);
                 ui.add_space(8.0);
                 let wide = ui.available_width() > 760.0;
                 if wide {
@@ -1044,6 +1344,5 @@ impl eframe::App for NirusecApp {
                 }
             });
         self.confirmation(ctx, &pal);
-        let _ = self.started;
     }
 }

@@ -21,8 +21,10 @@ jobs:
           mkdir -p dist
           cp target/release/nirusec install.sh uninstall.sh dist/
           cp -R assets dist/
-          (cd dist && tar -czf "nirusec-${GITHUB_REF_NAME#v}-x86_64-linux-gnu.tar.gz" nirusec install.sh uninstall.sh assets)
-          cd dist && sha256sum nirusec *.tar.gz install.sh uninstall.sh assets/* > SHA256SUMS
+          printf '%s\n' "${GITHUB_REF_NAME#v}" > dist/VERSION
+          (cd dist && sha256sum nirusec install.sh uninstall.sh VERSION assets/* > SHA256SUMS)
+          (cd dist && tar -czf "nirusec-${GITHUB_REF_NAME#v}-x86_64-linux-gnu.tar.gz" nirusec VERSION install.sh uninstall.sh assets SHA256SUMS)
+          cd dist && sha256sum nirusec *.tar.gz install.sh uninstall.sh VERSION assets/* > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           make_latest: true
@@ -31,6 +33,7 @@ jobs:
             dist/nirusec-*-x86_64-linux-gnu.tar.gz
             dist/install.sh
             dist/uninstall.sh
+            dist/VERSION
             dist/assets/*
             dist/SHA256SUMS
           generate_release_notes: true

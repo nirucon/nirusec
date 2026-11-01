@@ -5,7 +5,9 @@ use crate::{
 };
 use std::{
     collections::HashMap,
-    fs,
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -80,10 +82,6 @@ fn command(program: &str, args: &[&str], seconds: u64) -> Result<String, String>
     }
 }
 
-fn command_optional(program: &str, args: &[&str], seconds: u64) -> Option<String> {
-    command(program, args, seconds).ok()
-}
-
 pub fn command_exists(program: &str) -> bool {
     if program.contains('/') {
         return Path::new(program).is_file();
@@ -128,6 +126,12 @@ fn firewall_rules() -> (bool, Vec<FirewallRule>, Option<String>) {
     }
 }
 
+pub fn ufw_enabled_from_config() -> Option<bool> {
+    read_key_file("/etc/ufw/ufw.conf")
+        .get("ENABLED")
+        .map(|value| value.eq_ignore_ascii_case("yes"))
+}
+
 pub fn firewall_status() -> FirewallStatus {
     let installed = command_exists("ufw");
     if !installed {
@@ -137,11 +141,8 @@ pub fn firewall_status() -> FirewallStatus {
             ..Default::default()
         };
     }
-    let conf = read_key_file("/etc/ufw/ufw.conf");
     let defaults = read_key_file("/etc/default/ufw");
-    let enabled = conf
-        .get("ENABLED")
-        .map(|value| value.eq_ignore_ascii_case("yes"));
+    let enabled = ufw_enabled_from_config();
     let (rules_available, rules, rules_error) = firewall_rules();
     FirewallStatus {
         installed,
@@ -157,26 +158,52 @@ pub fn firewall_status() -> FirewallStatus {
     }
 }
 
-fn scope(address: &str) -> &'static str {
+fn tailscale_networks() -> Vec<String> {
+    let mut networks = Vec::new();
+    if let Ok(text) = command("ip", &["-o", "addr", "show", "dev", "tailscale0"], 2) {
+        for line in text.lines() {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            for (index, word) in words.iter().enumerate() {
+                if matches!(*word, "inet" | "inet6") {
+                    if let Some(value) = words.get(index + 1) {
+                        networks.push(value.split('/').next().unwrap_or("").to_string());
+                    }
+                }
+            }
+        }
+    }
+    networks
+}
+
+fn is_private(address: &str) -> bool {
+    match address.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            ip.is_private()
+                || ip.is_link_local()
+                || (ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]))
+        }
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_unique_local() || ip.is_unicast_link_local(),
+        Err(_) => true,
+    }
+}
+
+fn scope(address: &str, tailscale: &[String]) -> &'static str {
     let address = address.trim_matches(['[', ']']);
     if address == "::1" || address.starts_with("127.") {
         "localhost"
     } else if address == "0.0.0.0" || address == "::" || address == "*" {
         "all interfaces"
-    } else if address.starts_with("100.") {
-        if let Ok(std::net::IpAddr::V4(ip)) = address.parse::<std::net::IpAddr>() {
-            let octets = ip.octets();
-            if octets[0] == 100 && (64..=127).contains(&octets[1]) {
-                return "Tailscale";
-            }
-        }
+    } else if tailscale.iter().any(|item| item == address) || address.starts_with("fd7a:115c:a1e0")
+    {
+        "Tailscale"
+    } else if is_private(address) {
         "LAN"
     } else {
-        "LAN"
+        "public"
     }
 }
 
-fn socket_line(line: &str, protocol: &str, out: &mut Vec<Port>) {
+fn socket_line(line: &str, protocol: &str, tailscale: &[String], out: &mut Vec<Port>) {
     let fields: Vec<&str> = line.split_whitespace().collect();
     if fields.len() < 4 {
         return;
@@ -189,7 +216,7 @@ fn socket_line(line: &str, protocol: &str, out: &mut Vec<Port>) {
         return;
     };
     let address = address.trim_matches(['[', ']']);
-    let scope = scope(address).to_string();
+    let scope = scope(address, tailscale).to_string();
     if out.iter().any(|item: &Port| {
         item.protocol == protocol && item.port == port && item.address == address
     }) {
@@ -206,11 +233,12 @@ fn socket_line(line: &str, protocol: &str, out: &mut Vec<Port>) {
 pub fn listening_ports() -> (Vec<Port>, Option<String>) {
     let mut ports = Vec::new();
     let mut errors = Vec::new();
+    let tailscale = tailscale_networks();
     for (protocol, args) in [("tcp", ["-H", "-lnt"]), ("udp", ["-H", "-lnu"])] {
         match command("ss", &args, 5) {
             Ok(text) => {
                 for line in text.lines() {
-                    socket_line(line, protocol, &mut ports);
+                    socket_line(line, protocol, &tailscale, &mut ports);
                 }
             }
             Err(error) => errors.push(error),
@@ -241,7 +269,12 @@ pub fn updates_status() -> UpdatesStatus {
     let manager = update_manager();
     let result = match distro() {
         "debian" => command("apt-get", &["-s", "upgrade"], 20),
-        "arch" => command("pacman", &["-Qu"], 15),
+        "arch" => match run_with_timeout("pacman", &["-Qu"], 15) {
+            Ok(output) if output.status.success() => Ok(output_text(&output)),
+            Ok(output) if output.status.code() == Some(1) => Ok(String::new()),
+            Ok(output) => Err(output_text(&output)),
+            Err(error) => Err(error),
+        },
         "void" => command("xbps-install", &["-un"], 15),
         _ => Err("no supported package manager".into()),
     };
@@ -267,13 +300,6 @@ pub fn updates_status() -> UpdatesStatus {
                 error: None,
             }
         }
-        Err(error) if distro() == "arch" && error.contains("exit") => UpdatesStatus {
-            manager: manager.into(),
-            count: 0,
-            packages: Vec::new(),
-            security_known: false,
-            error: None,
-        },
         Err(error) => UpdatesStatus {
             manager: manager.into(),
             error: Some(error),
@@ -294,22 +320,65 @@ fn cpu_vendor() -> &'static str {
     }
 }
 
-fn package_present(name: &str) -> Option<bool> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PackageState {
+    Present,
+    Absent,
+    Unknown,
+}
+
+fn package_state(name: &str) -> PackageState {
     match distro() {
-        "debian" => command("dpkg-query", &["-W", "-f=${db:Status-Abbrev}", name], 5)
-            .ok()
-            .map(|status| status.starts_with("ii")),
-        "arch" => command("pacman", &["-Qq", name], 5)
-            .ok()
-            .map(|text| !text.trim().is_empty()),
-        "void" => command("xbps-query", &["-l"], 10)
-            .ok()
-            .map(|text| text.lines().any(|line| line.contains(&format!(" {name}-")))),
-        _ => None,
+        "debian" => {
+            let Ok(output) =
+                run_with_timeout("dpkg-query", &["-W", "-f=${db:Status-Abbrev}", name], 5)
+            else {
+                return PackageState::Unknown;
+            };
+            if output.status.success() {
+                let status = String::from_utf8_lossy(&output.stdout);
+                if status.starts_with("ii") {
+                    PackageState::Present
+                } else {
+                    PackageState::Absent
+                }
+            } else if output.status.code() == Some(1) {
+                PackageState::Absent
+            } else {
+                PackageState::Unknown
+            }
+        }
+        "arch" => {
+            let Ok(output) = run_with_timeout("pacman", &["-Qq", name], 5) else {
+                return PackageState::Unknown;
+            };
+            if output.status.success() {
+                if String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+                    PackageState::Absent
+                } else {
+                    PackageState::Present
+                }
+            } else if output.status.code() == Some(1) {
+                PackageState::Absent
+            } else {
+                PackageState::Unknown
+            }
+        }
+        "void" => {
+            let Ok(text) = command("xbps-query", &["-l"], 10) else {
+                return PackageState::Unknown;
+            };
+            if text.lines().any(|line| line.contains(&format!(" {name}-"))) {
+                PackageState::Present
+            } else {
+                PackageState::Absent
+            }
+        }
+        _ => PackageState::Unknown,
     }
 }
 
-fn firmware_recommended() -> (Vec<String>, bool) {
+fn firmware_recommended() -> (Vec<String>, Vec<String>, Vec<String>, bool) {
     let mut packages = Vec::new();
     match distro() {
         "arch" => {
@@ -344,44 +413,140 @@ fn firmware_recommended() -> (Vec<String>, bool) {
         }
         _ => {}
     }
-    let microcode_missing = packages
-        .iter()
-        .find(|name| name.contains("ucode") || name.contains("microcode"))
-        .and_then(|name| package_present(name))
-        .is_some_and(|present| !present);
-    let missing = packages
-        .into_iter()
-        .filter(|name| package_present(name) == Some(false))
-        .collect();
-    (missing, microcode_missing)
+    let mut missing = Vec::new();
+    let mut unknown = Vec::new();
+    let mut microcode_missing = false;
+    for package in &packages {
+        let state = package_state(package);
+        if package.contains("ucode") || package.contains("microcode") {
+            microcode_missing = state == PackageState::Absent;
+        }
+        match state {
+            PackageState::Absent => missing.push(package.clone()),
+            PackageState::Unknown => unknown.push(package.clone()),
+            PackageState::Present => {}
+        }
+    }
+    (packages, missing, unknown, microcode_missing)
 }
 
-fn fwupd_info() -> (bool, bool, String) {
+fn fwupd_json_devices(value: &serde_json::Value) -> Vec<FirmwareDevice> {
+    value
+        .get("Devices")
+        .and_then(|devices| devices.as_array())
+        .map(|devices| {
+            devices
+                .iter()
+                .filter_map(|device| {
+                    let release = device
+                        .get("Releases")
+                        .and_then(|items| items.as_array())
+                        .and_then(|items| items.first());
+                    let id = device.get("DeviceId")?.as_str()?.to_string();
+                    let new_version = release
+                        .and_then(|item| item.get("Version"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let flags = device
+                        .get("Flags")
+                        .and_then(|items| items.as_array())
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| item.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some(FirmwareDevice {
+                        id,
+                        name: device
+                            .get("Name")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("Unknown device")
+                            .to_string(),
+                        current_version: device
+                            .get("Version")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        new_version,
+                        flags,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn fwupd_info() -> (bool, Vec<FirmwareDevice>, String, Option<String>) {
     if !command_exists("fwupdmgr") {
-        return (false, false, "fwupd is not installed".into());
+        return (false, Vec::new(), "fwupd is not installed".into(), None);
     }
-    match command("fwupdmgr", &["get-updates", "--no-reboot-check"], 12) {
-        Ok(text) => {
-            let updates = text.to_ascii_lowercase().contains("update")
-                && !text.to_ascii_lowercase().contains("no updates");
-            let summary = text.lines().take(8).collect::<Vec<_>>().join("\n");
-            (true, updates, summary)
-        }
-        Err(error) => (true, false, error),
+    let Ok(output) = run_with_timeout(
+        "fwupdmgr",
+        &["get-updates", "--json", "--no-reboot-check"],
+        20,
+    ) else {
+        return (
+            true,
+            Vec::new(),
+            "Could not run fwupdmgr".into(),
+            Some("Could not run fwupdmgr".into()),
+        );
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+        let devices = fwupd_json_devices(&value);
+        let summary = if devices.is_empty() {
+            "No device firmware updates are available.".into()
+        } else {
+            format!("{} device firmware update(s) available.", devices.len())
+        };
+        return (
+            true,
+            devices,
+            summary,
+            if output.status.success() {
+                None
+            } else {
+                Some(output_text(&output))
+            },
+        );
+    }
+    let text = output_text(&output);
+    if output.status.success() {
+        let updates = text.to_ascii_lowercase().contains("update")
+            && !text.to_ascii_lowercase().contains("no updates");
+        (
+            true,
+            Vec::new(),
+            if updates {
+                "fwupd could not be parsed; open the fwupd details before updating.".into()
+            } else {
+                "No device firmware updates are available.".into()
+            },
+            None,
+        )
+    } else {
+        (true, Vec::new(), text.clone(), Some(text))
     }
 }
 
 pub fn firmware_status() -> FirmwareStatus {
-    let (missing, microcode_missing) = firmware_recommended();
-    let (fwupd_available, fwupd_updates, fwupd_summary) = fwupd_info();
+    let (recommended, missing, unknown, microcode_missing) = firmware_recommended();
+    let (fwupd_available, devices, fwupd_summary, fwupd_error) = fwupd_info();
     FirmwareStatus {
         manager: distro_label().into(),
-        recommended: Vec::new(),
+        recommended,
         missing,
+        unknown,
         microcode_missing,
         fwupd_available,
         fwupd_summary,
-        fwupd_updates,
+        fwupd_updates: !devices.is_empty(),
+        fwupd_error,
+        devices,
         error: None,
     }
 }
@@ -389,6 +554,7 @@ pub fn firmware_status() -> FirmwareStatus {
 pub fn docker_status() -> DockerStatus {
     if !command_exists("docker") {
         return DockerStatus {
+            installed: false,
             available: false,
             error: Some("Docker is not installed".into()),
             ..Default::default()
@@ -418,12 +584,14 @@ pub fn docker_status() -> DockerStatus {
                 })
                 .collect();
             DockerStatus {
+                installed: true,
                 available: true,
                 containers,
                 error: None,
             }
         }
         Err(error) => DockerStatus {
+            installed: true,
             available: false,
             error: Some(error),
             ..Default::default()
@@ -431,20 +599,52 @@ pub fn docker_status() -> DockerStatus {
     }
 }
 
-pub fn logs_status() -> LogsStatus {
-    let source = "/var/log/ufw.log";
-    let text = fs::read_to_string(source)
-        .ok()
-        .or_else(|| command_optional("journalctl", &["-k", "--since", "-6h", "--no-pager"], 8))
-        .unwrap_or_default();
-    if text.trim().is_empty() {
-        return LogsStatus {
-            available: false,
-            source: source.into(),
-            error: Some("UFW logs are unavailable or need elevated permissions".into()),
-            ..Default::default()
-        };
+const MAX_LOG_BYTES: u64 = 2 * 1024 * 1024;
+
+fn read_tail(path: &str, limit: u64) -> Result<(String, bool), String> {
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let length = file.metadata().map_err(|e| e.to_string())?.len();
+    let truncated = length > limit;
+    if truncated {
+        file.seek(SeekFrom::Start(length - limit))
+            .map_err(|e| e.to_string())?;
     }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let mut text = String::from_utf8_lossy(&bytes).to_string();
+    if truncated {
+        if let Some(index) = text.find('\n') {
+            text.drain(..=index);
+        }
+    }
+    Ok((text, truncated))
+}
+
+pub fn logs_status() -> LogsStatus {
+    let file_source = "/var/log/ufw.log";
+    let (text, source, window, truncated) = match read_tail(file_source, MAX_LOG_BYTES) {
+        Ok((text, truncated)) if !text.trim().is_empty() => (
+            text,
+            file_source.to_string(),
+            format!("last {} KiB of the file", MAX_LOG_BYTES / 1024),
+            truncated,
+        ),
+        _ => match command("journalctl", &["-k", "--since", "-6h", "--no-pager"], 8) {
+            Ok(text) if !text.trim().is_empty() => {
+                (text, "journalctl -k".into(), "last 6 hours".into(), false)
+            }
+            _ => {
+                return LogsStatus {
+                    available: false,
+                    source: file_source.into(),
+                    window: "no readable window".into(),
+                    truncated: false,
+                    error: Some("UFW logs are unavailable or need elevated permissions".into()),
+                    ..Default::default()
+                };
+            }
+        },
+    };
     let mut blocked = 0u32;
     let mut allowed = 0u32;
     let mut counts: HashMap<(String, String, String), u32> = HashMap::new();
@@ -470,7 +670,7 @@ pub fn logs_status() -> LogsStatus {
         let port = field("DPT=");
         let protocol = field("PROTO=");
         let source = field("SRC=");
-        if !port.is_empty() {
+        if kind == "BLOCK" && !port.is_empty() {
             *counts.entry((kind.into(), port, protocol)).or_default() += 1;
         }
         let _ = source;
@@ -489,7 +689,9 @@ pub fn logs_status() -> LogsStatus {
     top.truncate(10);
     LogsStatus {
         available: true,
-        source: source.into(),
+        source,
+        window,
+        truncated,
         blocked,
         allowed,
         top,
@@ -500,6 +702,7 @@ pub fn logs_status() -> LogsStatus {
 pub fn collect() -> Status {
     let hostname = hostname();
     let firewall = firewall_status();
+    let profile = crate::profiles::read_status();
     let (ports, ports_error) = listening_ports();
     let updates = updates_status();
     let firmware = firmware_status();
@@ -509,33 +712,48 @@ pub fn collect() -> Status {
     if let Some(error) = &ports_error {
         errors.push(error.clone());
     }
-    if let Some(error) = &firewall.error {
-        if !firewall.installed {
-            errors.push(error.clone());
-        }
+    if !firewall.installed {
+        errors.push("UFW is not installed".into());
+    } else if firewall.enabled.is_none() {
+        errors.push("UFW enabled state could not be determined".into());
     }
     if let Some(error) = &updates.error {
         errors.push(format!("updates: {error}"));
     }
-    if let Some(error) = &docker.error {
-        if docker.available {
-            errors.push(format!("docker: {error}"));
-        }
+    if docker.installed && !docker.available {
+        errors.push(format!(
+            "docker: {}",
+            docker.error.as_deref().unwrap_or("unavailable")
+        ));
     }
-    let exposed = ports
-        .iter()
-        .any(|port| matches!(port.scope.as_str(), "all interfaces" | "Tailscale"));
-    let critical = firewall.enabled == Some(false) && exposed;
+    if !firmware.unknown.is_empty() {
+        errors.push(format!(
+            "firmware: {} package state(s) unknown",
+            firmware.unknown.len()
+        ));
+    }
+    let exposed = ports.iter().any(|port| {
+        matches!(
+            port.scope.as_str(),
+            "all interfaces" | "Tailscale" | "public"
+        )
+    });
+    let intentional_off = profile.id == "off"
+        && matches!(profile.state.as_str(), "kept" | "off")
+        && firewall.enabled == Some(false);
+    let critical = firewall.enabled == Some(false) && exposed && !intentional_off;
     let issues = [firmware.missing.len(), updates.count];
     let state = if critical {
         "critical"
-    } else if !errors.is_empty() || issues.iter().any(|count| *count > 0) {
+    } else if !errors.is_empty() || issues.iter().any(|count| *count > 0) || intentional_off {
         "warning"
     } else {
         "ok"
     };
     let summary = if critical {
         "Firewall is inactive while services are exposed".into()
+    } else if intentional_off {
+        "UFW is disabled by the Off profile".into()
     } else if !firewall.installed {
         "UFW is not installed".into()
     } else if !errors.is_empty() {
@@ -554,6 +772,7 @@ pub fn collect() -> Status {
         state: state.into(),
         summary,
         firewall,
+        profile,
         ports,
         updates,
         firmware,
@@ -565,6 +784,9 @@ pub fn collect() -> Status {
 
 fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
     fs::create_dir_all(target).map_err(|e| e.to_string())?;
+    if let Ok(metadata) = fs::metadata(source) {
+        let _ = fs::set_permissions(target, metadata.permissions());
+    }
     for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
@@ -578,17 +800,22 @@ fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Back up the small `/etc/ufw` configuration before a recovery action.
+/// Back up `/etc/ufw` and `/etc/default/ufw` before a recovery action.
 /// Backups are root-only and never placed in a repository or user cache.
 pub fn backup_ufw() -> Result<PathBuf, String> {
     let root = PathBuf::from("/var/backups/nirusec");
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
+        .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    let target = root.join(format!("ufw-{stamp}"));
-    copy_tree(Path::new("/etc/ufw"), &target)?;
+    let target = root.join(format!("ufw-{stamp}-{}", std::process::id()));
+    fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    copy_tree(Path::new("/etc/ufw"), &target.join("ufw"))?;
+    if Path::new("/etc/default/ufw").is_file() {
+        fs::copy("/etc/default/ufw", target.join("default-ufw")).map_err(|e| e.to_string())?;
+    }
     let mut backups: Vec<PathBuf> = fs::read_dir(&root)
         .into_iter()
         .flatten()
@@ -600,11 +827,62 @@ pub fn backup_ufw() -> Result<PathBuf, String> {
         })
         .collect();
     backups.sort();
-    while backups.len() > 5 {
+    while backups.len() > 8 {
         let old = backups.remove(0);
         let _ = fs::remove_dir_all(old);
     }
     Ok(target)
+}
+
+fn backup_enabled(path: &Path) -> Option<bool> {
+    let conf = if path.join("ufw").is_dir() {
+        path.join("ufw/ufw.conf")
+    } else {
+        path.join("ufw.conf")
+    };
+    read_key_file(conf.to_str().unwrap_or("/etc/ufw/ufw.conf"))
+        .get("ENABLED")
+        .map(|value| value.eq_ignore_ascii_case("yes"))
+}
+
+/// Restore a specific NIRUSEC UFW backup, including `/etc/default/ufw`.
+/// The caller can force the previous enabled state; otherwise it is taken from
+/// the backup. A previously disabled firewall is never silently enabled.
+pub fn restore_backup(path: &Path, force_enabled: Option<bool>) -> Result<String, String> {
+    if !path.is_dir() {
+        return Err(format!("backup does not exist: {}", path.display()));
+    }
+    let enabled = force_enabled.or_else(|| backup_enabled(path));
+    let ufw_tree = if path.join("ufw").is_dir() {
+        path.join("ufw")
+    } else {
+        path.to_path_buf()
+    };
+    run_root_command("ufw", &["--force", "disable"])?;
+    copy_tree(&ufw_tree, Path::new("/etc/ufw"))?;
+    let default_backup = path.join("default-ufw");
+    if default_backup.is_file() {
+        fs::copy(&default_backup, "/etc/default/ufw").map_err(|e| e.to_string())?;
+    }
+    let output = if enabled == Some(true) {
+        run_root_command("ufw", &["--force", "enable"])?
+    } else {
+        run_root_command("ufw", &["--force", "disable"])?
+    };
+    let mut message = format!(
+        "restored {} (firewall was {})",
+        path.display(),
+        if enabled == Some(true) {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    if !output.is_empty() {
+        message.push('\n');
+        message.push_str(&output);
+    }
+    Ok(message)
 }
 
 /// Emergency recovery: preserve the current UFW files, apply a small
@@ -629,7 +907,7 @@ pub fn safe_mode() -> Result<String, String> {
     Ok(format!("{log}Safe mode active. Current UFW files were backed up. SSH is reachable on port 22; Tailscale is trusted."))
 }
 
-pub fn restore_ufw() -> Result<String, String> {
+pub fn latest_backup() -> Option<PathBuf> {
     let root = PathBuf::from("/var/backups/nirusec");
     let mut backups: Vec<PathBuf> = fs::read_dir(&root)
         .into_iter()
@@ -642,17 +920,14 @@ pub fn restore_ufw() -> Result<String, String> {
         })
         .collect();
     backups.sort();
-    let Some(latest) = backups.last() else {
+    backups.pop()
+}
+
+pub fn restore_ufw() -> Result<String, String> {
+    let Some(latest) = latest_backup() else {
         return Err("no NIRUSEC UFW backup exists".into());
     };
-    run_root_command("ufw", &["--force", "disable"])?;
-    copy_tree(latest, Path::new("/etc/ufw"))?;
-    let output = run_root_command("ufw", &["--force", "enable"])?;
-    Ok(format!(
-        "restored {}
-{output}",
-        latest.display()
-    ))
+    restore_backup(&latest, None)
 }
 
 fn package_install_command(packages: &[String]) -> Result<(), String> {
@@ -690,7 +965,7 @@ fn package_install_command(packages: &[String]) -> Result<(), String> {
 }
 
 pub fn install_firmware() -> HelperResponse {
-    let (missing, _) = firmware_recommended();
+    let (_, missing, _, _) = firmware_recommended();
     if missing.is_empty() {
         return ufw::success("No recommended firmware packages are missing", None);
     }
@@ -741,12 +1016,23 @@ pub(crate) fn run_root_command(program: &str, args: &[&str]) -> Result<String, S
     }
 }
 
-pub fn update_firmware() -> HelperResponse {
+pub fn update_firmware(device: Option<&str>) -> HelperResponse {
     if !command_exists("fwupdmgr") {
         return ufw::failure("fwupd is not installed");
     }
-    match run_root_command("fwupdmgr", &["update", "-y"]) {
-        Ok(output) => ufw::success("Device firmware update completed", Some(output)),
+    let mut args = vec!["update", "--no-reboot-check", "-y"];
+    if let Some(device) = device {
+        args.push(device);
+    }
+    match run_root_command("fwupdmgr", &args) {
+        Ok(output) => ufw::success(
+            if device.is_some() {
+                "Selected device firmware update completed"
+            } else {
+                "Device firmware update completed"
+            },
+            Some(output),
+        ),
         Err(error) => ufw::failure(&error),
     }
 }
@@ -758,7 +1044,7 @@ pub fn helper_command(op: &str) -> HelperResponse {
         "ufw-disable" => ufw::set_enabled(false),
         "update" => update_packages(),
         "firmware-install" => install_firmware(),
-        "firmware-update" => update_firmware(),
+        "firmware-update" => update_firmware(None),
         _ => ufw::failure("unknown helper operation"),
     }
 }

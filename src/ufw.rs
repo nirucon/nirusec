@@ -13,6 +13,7 @@ pub struct HelperResponse {
     pub token: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct RuleRequest {
     pub action: String,
     pub protocol: String,
@@ -190,42 +191,70 @@ pub fn set_default(direction: &str, policy: &str) -> HelperResponse {
     )
 }
 
-pub fn add_rule(request: &RuleRequest) -> HelperResponse {
-    if let Err(error) = validate_rule(request) {
-        return failure(&error);
-    }
+fn add_args(request: &RuleRequest) -> Vec<String> {
     let mut args = vec![request.action.clone()];
-    if request.source != "any" {
-        args.push("from".into());
-        args.push(request.source.clone());
-    }
-    if request.port != "any" {
-        if request.source == "any" {
-            args.push(request.port.clone());
-            if request.protocol != "any" {
-                args.push(request.protocol.clone());
-            }
-        } else {
-            args.push("to".into());
-            args.push("any".into());
-            args.push("port".into());
-            args.push(request.port.clone());
+    if request.source == "any" {
+        if request.port == "any" {
             if request.protocol != "any" {
                 args.push("proto".into());
                 args.push(request.protocol.clone());
             }
+        } else if request.protocol == "any" {
+            args.push(request.port.clone());
+        } else {
+            args.push(format!("{}/{}", request.port, request.protocol));
+        }
+    } else {
+        args.push("from".into());
+        args.push(request.source.clone());
+        args.push("to".into());
+        args.push("any".into());
+        if request.port != "any" {
+            args.push("port".into());
+            args.push(request.port.clone());
+        }
+        if request.protocol != "any" {
+            args.push("proto".into());
+            args.push(request.protocol.clone());
         }
     }
     if !request.comment.is_empty() {
         args.push("comment".into());
         args.push(request.comment.clone());
     }
-    run_change(&args, "Firewall rule added")
+    args
 }
 
-pub fn delete_rule(number: u32) -> HelperResponse {
+pub fn add_rule(request: &RuleRequest) -> HelperResponse {
+    if let Err(error) = validate_rule(request) {
+        return failure(&error);
+    }
+    run_change(&add_args(request), "Firewall rule added")
+}
+
+pub fn delete_rule(number: u32, expected: Option<&str>) -> HelperResponse {
     if number == 0 || number > 99999 {
         return failure("invalid rule number");
+    }
+    if let Some(expected) = expected {
+        if expected.chars().count() > 500 {
+            return failure("expected rule text is too long");
+        }
+        let before = status();
+        let Some(raw) = before.status.as_deref() else {
+            return failure("could not read current rules before deleting");
+        };
+        let Some(rule) = parse_rules(raw)
+            .into_iter()
+            .find(|rule| rule.number == number)
+        else {
+            return failure("the selected rule no longer exists; reload the rules");
+        };
+        if rule.raw != expected {
+            return failure(
+                "the selected rule changed since it was loaded; reload before deleting",
+            );
+        }
     }
     run_change(
         &["--force".into(), "delete".into(), number.to_string()],
@@ -310,5 +339,42 @@ mod tests {
             comment: String::new(),
         };
         assert!(validate_rule(&request).is_err());
+    }
+
+    #[test]
+    fn builds_ufw_rule_arguments() {
+        let base = RuleRequest {
+            action: "allow".into(),
+            protocol: "tcp".into(),
+            port: "22".into(),
+            source: "any".into(),
+            comment: String::new(),
+        };
+        assert_eq!(add_args(&base), ["allow", "22/tcp"]);
+        assert_eq!(
+            add_args(&RuleRequest {
+                source: "10.0.0.0/8".into(),
+                ..base.clone()
+            }),
+            [
+                "allow",
+                "from",
+                "10.0.0.0/8",
+                "to",
+                "any",
+                "port",
+                "22",
+                "proto",
+                "tcp"
+            ]
+        );
+        assert_eq!(
+            add_args(&RuleRequest {
+                port: "any".into(),
+                comment: "testing".into(),
+                ..base
+            }),
+            ["allow", "proto", "tcp", "comment", "testing"]
+        );
     }
 }

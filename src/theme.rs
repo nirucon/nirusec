@@ -282,6 +282,11 @@ pub fn load() -> Theme {
         }
     }
     let p = &mut theme.palette;
+    p.light = (0.2126 * p.background.r() as f32
+        + 0.7152 * p.background.g() as f32
+        + 0.0722 * p.background.b() as f32)
+        / 255.0
+        > 0.55;
     p.surface = blend(
         p.background,
         p.foreground,
@@ -330,11 +335,19 @@ pub fn apply(ctx: &Context, theme: &Theme) {
 fn signature() -> u64 {
     let base = config_home();
     let mut hash = 0u64;
-    for path in [
+    let mut paths = vec![
         base.join("niruwm/config.toml"),
         base.join("niruwm/appearance.toml"),
-        base.join("niruwm/themes"),
-    ] {
+    ];
+    if let Ok(entries) = fs::read_dir(base.join("niruwm/themes")) {
+        paths.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file()),
+        );
+    }
+    for path in paths {
         if let Ok(meta) = fs::metadata(&path) {
             let modified = meta
                 .modified()

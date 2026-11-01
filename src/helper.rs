@@ -25,47 +25,79 @@ pub fn run(args: &[String]) -> ! {
     let Some(op) = args.first().map(String::as_str) else {
         print(ufw::failure("missing operation"));
     };
-    match op {
-        "ufw-status" => print(ufw::status()),
-        "ufw-enable" => print(ufw::set_enabled(true)),
-        "ufw-disable" => print(ufw::set_enabled(false)),
+    let manual_change = matches!(
+        op,
+        "ufw-enable"
+            | "ufw-disable"
+            | "ufw-add"
+            | "ufw-delete"
+            | "ufw-default"
+            | "safe-mode"
+            | "restore-ufw"
+    );
+    if manual_change && profiles::has_pending() {
+        print(ufw::failure(
+            "a profile change is pending; keep or restore it before editing the firewall",
+        ));
+    }
+    let result = match op {
+        "ufw-status" => ufw::status(),
+        "ufw-enable" => ufw::set_enabled(true),
+        "ufw-disable" => ufw::set_enabled(false),
         "ufw-add" => {
             if args.len() != 6 {
                 print(ufw::failure(
                     "ufw-add needs action, protocol, port, source and comment",
                 ));
             }
-            print(ufw::add_rule(&RuleRequest {
+            ufw::add_rule(&RuleRequest {
                 action: args[1].clone(),
                 protocol: args[2].clone(),
                 port: args[3].clone(),
                 source: args[4].clone(),
                 comment: args[5].clone(),
-            }));
+            })
         }
         "ufw-delete" => {
             let Some(number) = args.get(1).and_then(|value| value.parse::<u32>().ok()) else {
                 print(ufw::failure("invalid rule number"));
             };
-            print(ufw::delete_rule(number));
+            ufw::delete_rule(number, args.get(2).map(String::as_str))
         }
         "ufw-default" => {
             if args.len() != 3 {
                 print(ufw::failure("ufw-default needs direction and policy"));
             }
-            print(ufw::set_default(&args[1], &args[2]));
+            ufw::set_default(&args[1], &args[2])
         }
-        "update" => print(system::update_packages()),
-        "firmware-install" => print(system::install_firmware()),
-        "firmware-update" => print(system::update_firmware()),
+        "update" => system::update_packages(),
+        "firmware-install" => system::install_firmware(),
+        "firmware-update" => {
+            let device = args.get(1).map(String::as_str);
+            if let Some(device) = device {
+                if device.is_empty()
+                    || device.len() > 80
+                    || !device.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-')
+                {
+                    print(ufw::failure("invalid fwupd device identifier"));
+                }
+            }
+            system::update_firmware(device)
+        }
         "safe-mode" => match system::safe_mode() {
-            Ok(message) => print(ufw::success(&message, None)),
-            Err(error) => print(ufw::failure(&error)),
+            Ok(message) => ufw::success(&message, None),
+            Err(error) => ufw::failure(&error),
         },
         "restore-ufw" => match system::restore_ufw() {
-            Ok(message) => print(ufw::success(&message, None)),
-            Err(error) => print(ufw::failure(&error)),
+            Ok(message) => ufw::success(&message, None),
+            Err(error) => ufw::failure(&error),
         },
+        "restore-transaction" => {
+            let Some(token) = args.get(1) else {
+                print(ufw::failure("restore-transaction needs a token"));
+            };
+            profiles::restore_transaction(token)
+        }
         "profile-apply" => {
             let Some(profile) = args
                 .get(1)
@@ -75,14 +107,18 @@ pub fn run(args: &[String]) -> ! {
                     "profile-apply needs off, soft, medium, hard or gaming",
                 ));
             };
-            print(profiles::apply(profile));
+            profiles::apply(profile)
         }
         "profile-confirm" => {
             let Some(token) = args.get(1) else {
                 print(ufw::failure("profile-confirm needs a token"));
             };
-            print(profiles::confirm(token));
+            profiles::confirm(token)
         }
-        _ => print(ufw::failure("unknown operation")),
+        _ => ufw::failure("unknown operation"),
+    };
+    if result.ok && manual_change {
+        let _ = profiles::mark_custom(&format!("{} completed via NIRUSEC", op));
     }
+    print(result)
 }

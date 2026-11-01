@@ -129,3 +129,34 @@ firmware flashing, package upgrades and fail2ban changes were not performed.
   were restored after the test. Home-LAN and Tailscale access remained usable.
 - Workplace-network documentation was removed from the public repository; no
   current public file names the private network.
+
+## 0.1.8 profile transaction and GUI pass — 2026-11-01
+
+Artifact: NIRUSEC 0.1.8, one x86_64 glibc binary. Tested on `niruxwork` with
+the new helper and PolicyKit action installed. `pkaction` loaded
+`se.nirucon.nirusec.manage` after the corrected `<annotate>` policy file.
+
+- Profile apply: backup included `/etc/ufw` and `/etc/default/ufw`; the pre-test
+  home-LAN and USB-Wi-Fi rules were present in the backup. The state file showed
+  `pending` with a 120-second deadline.
+- A new SSH session through Tailscale succeeded while the profile was pending.
+- `profile-confirm` changed the state to `kept` and removed the transaction
+  token. The global GUI banner and profile card are designed around this state.
+- Automatic rollback was tested by applying Soft and waiting the full 120
+  seconds without confirming. The watchdog restored the exact pre-test custom
+  rules, including the USB interface rules, and kept UFW enabled because
+  `previous_enabled` was true. State became `rolled_back`.
+- A real rule was added with source, protocol, port and comment, then deleted
+  using a freshly loaded rule number plus the expected raw rule text. UFW
+  reported the correct rule before deletion and no test rule remained.
+- The 0.1.8 NIRUSEC GUI was visually launched on `studio` under the live X11
+  display; the Firewall view showed the global active-profile banner, profile
+  cards and policy actions without clipping at the available desktop size.
+- A second transaction was tested on `studio`, where UFW was already inactive:
+  Off profile → confirm → restore kept `ENABLED=no` and `Status: inactive`.
+  A previously disabled firewall is therefore not silently enabled.
+- The release tarball installer was run on `niruxwork` and `studio` with
+  `--no-deps`; local SHA-256 verification passed and the PolicyKit action loaded.
+- Not tested in this pass: full GUI PolicyKit authentication through the desktop
+  agent (the helper and policy were tested directly), narrow tiling screenshots,
+  actual firmware flashing and full package-manager upgrades.
