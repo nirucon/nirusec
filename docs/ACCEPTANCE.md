@@ -160,3 +160,21 @@ the new helper and PolicyKit action installed. `pkaction` loaded
 - Not tested in this pass: full GUI PolicyKit authentication through the desktop
   agent (the helper and policy were tested directly), narrow tiling screenshots,
   actual firmware flashing and full package-manager upgrades.
+
+## 0.1.8 fleet deployment — 2026-11-01
+
+| Machine | NIRUX | NIRUSEC | PolicyKit action | Bar module |
+|---|---|---|---|---|
+| studio | 0.12.175 | 0.1.8 | loaded | present |
+| othala | 0.12.175 | 0.1.8 | loaded | present |
+| niruxwork | 0.12.175 | 0.1.8 | loaded | present |
+| void | 0.12.175 | 0.1.8 | loaded | present |
+| algiz | 0.12.175 | 0.1.8 | loaded | present |
+| ingwaz | 0.12.175 | 0.1.8 | loaded | present |
+
+The published 0.1.8 helper binary was installed at the fixed path on every
+machine; `nirux extras status` reports the pinned and installed NIRUSEC version
+as 0.1.8. Existing UFW states and rules were preserved. No reboot or logout was
+needed for NIRUSEC. The previously running NIRUSEC GUI on `niruxwork` was
+restarted so it would load the new binary and show the active-profile banner.
+The current recorded state there is Custom after the live rule test.
