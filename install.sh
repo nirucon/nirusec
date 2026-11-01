@@ -87,6 +87,7 @@ else
     BIN_SRC="$TMP/nirusec"
 fi
 
+chmod +x "$BIN_SRC" 2>/dev/null || true
 [ -x "$BIN_SRC" ] || die 'NIRUSEC binary not found'
 
 runtime_deps
