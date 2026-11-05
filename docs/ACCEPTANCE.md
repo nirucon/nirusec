@@ -189,3 +189,26 @@ that session's cgroup, the same helper operation authenticated through `lxpolkit
 and returned the expected `ufw-status` result. Launch NIRUSEC from the desktop,
 NIRUBAR or another process owned by the active graphical session; a detached SSH
 launch is not a supported PolicyKit context.
+
+## 0.2.0 firewall run — 2026-11-05
+
+Artifact: NIRUSEC 0.2.0 candidate built on othala (Debian 13, rustc stable,
+`--locked`). Details and the finding-by-finding table:
+[REVIEW-0.2.md](REVIEW-0.2.md).
+
+| Check | Debian 13 (othala) | Arch (algiz) | Void (void) |
+|---|---|---|---|
+| `tests/netns/run.sh` (99 checks: no open window during apply, IPv6 parity, rollback after expiry, undo, interrupted by reboot, twin delete, block rule order, safe mode while pending, helper input validation, local exceptions, fast reload == `ufw reload`, Off/enable, backup restore, 0.1.8 migration) | pass 99/99 | pass 99/99 | pass 99/99 |
+| Native profile apply / keep / verify | pass | pass | pass |
+| Native automatic rollback (watchdog) | pass (systemd timer) | pass (systemd timer) | pass (detached root watchdog) |
+| Native block rule + undo | pass | pass | pass |
+| Fresh SSH over Tailscale after every step; second session survived | pass | pass | pass |
+| Exact restore of the original UFW files, status and netfilter | pass | pass | pass |
+| PolicyKit argv1 mapping in the real seat session | pass | not tested | not tested |
+| GUI screenshots (Xvfb, fixture helper) 420/640/960/1200 px | pass | — | — |
+| GUI idle CPU, 60 s, release build | 0.0 % (0.1.8: 0.0 %) | — | — |
+
+Not tested live in this run: a real reboot during and after a profile change
+(simulated with a boot-id change in the namespace suite), the full GUI
+PolicyKit dialog flow (Keep/Undo/Restore with a real agent while unlocked),
+package upgrades and firmware flashing.

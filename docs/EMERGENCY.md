@@ -23,8 +23,22 @@ Run it through the installed fixed helper (or, from a development checkout,
 6. enables UFW.
 
 Safe mode is deliberately more open than a normal profile. Confirm the
-machine is reachable, then repair the real rules or restore a backup. It also works through the NIRUSEC Firewall view's **Emergency safe mode**
-button.
+machine is reachable, then repair the real rules or restore a backup. It also
+works through the NIRUSEC Firewall view's **Emergency safe mode** button.
+
+Safe mode always runs, even while a firewall change is waiting for Keep/Undo
+or after a failed automatic restore: it cancels the pending change and its
+watchdog first, so the watchdog cannot undo the recovery later.
+
+## A change is waiting, or the computer restarted during one
+
+NIRUSEC shows a banner. **Undo now** / **Restore previous settings…** brings
+back the backup taken just before the change; **Keep** keeps it. From a
+console:
+
+```sh
+sudo /usr/local/libexec/nirusec-helper tx-resolve restore   # or: keep
+```
 
 ## Restore the previous UFW files
 
@@ -33,10 +47,11 @@ sudo /usr/local/libexec/nirusec-helper restore-ufw
 ```
 
 This restores the most recent NIRUSEC backup in `/var/backups/nirusec/`,
-including `/etc/default/ufw`. UFW is disabled while files are copied and then
-returned to the enabled state recorded in the backup. A previously disabled
-firewall is not silently enabled. Backups are root-only and never written to Git
-or the user state directory.
+including `/etc/default/ufw`, and returns UFW to the running state recorded in
+the backup without switching it off first. A previously disabled firewall is
+not silently enabled. Backups are root-only and never written to Git or the
+user state directory. To pick an older backup, use *Recent changes → Restore
+before this…* in the Firewall view.
 
 ## If Tailscale or SSH is the problem
 

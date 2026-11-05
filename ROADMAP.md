@@ -1,6 +1,7 @@
 # NIRUSEC roadmap and remaining work
 
-Status after **0.1.8** (2026-11-01). This is a working list, not a promise that
+Status after **0.2.0** (2026-11-05). See [docs/REVIEW-0.2.md](docs/REVIEW-0.2.md) for the
+findings fixed in 0.2.0. This is a working list, not a promise that
 every item belongs in the next release. Security and access-affecting items come
 before cosmetic work.
 
@@ -14,28 +15,29 @@ because `/run` is a tmpfs.
 
 Recommended design:
 
-- [ ] Write confirmed/current profile state to `/var/lib/nirusec/profile.json`
+- [x] Write confirmed/current profile state to `/var/lib/nirusec/state.json`
       with directory `0755` and file `0644`; it contains no credentials.
-- [ ] Keep pending transaction metadata, the watchdog script and the firewall
-      lock in `/run/nirusec`.
-- [ ] Read the persistent state first and fall back to the old `/run` path for
+- [x] Keep the firewall lock in `/run/nirusec`; pending transactions live in
+      `/var/lib/nirusec/tx` (0600) so a reboot cannot lose them.
+- [x] Read the persistent state first and fall back to the old `/run` path for
       migration; migrate once on the next successful profile apply.
-- [ ] Do not persist a `pending` transaction as the active profile. If a pending
+- [x] Do not persist a `pending` transaction as the active profile. If a pending
       transaction existed at shutdown, mark it **interrupted** after boot and
       show a prominent warning; the rollback timer cannot be trusted across a
       reboot.
-- [ ] Refuse a new profile apply while an interrupted transaction is unresolved.
-- [ ] Add a live reboot test: apply Soft → confirm → reboot → verify UFW rules,
+- [x] Refuse a new profile apply while an interrupted transaction is unresolved.
+- [ ] Add a live reboot test (simulated with a boot-id change in the netns
+      suite; the real reboot is still pending): apply Soft → confirm → reboot → verify UFW rules,
       active-profile banner, no stale pending token and no leftover watchdog.
 - [ ] Release the change and update the NIRUX extra pin only after that test.
 
 ### Verify the active profile more strongly
 
-- [ ] Store a root-owned snapshot/hash of the applied UFW configuration at
+- [x] Store a root-owned snapshot/hash of the applied UFW configuration at
       confirm time and verify it during an authenticated refresh.
-- [ ] Keep the current unprivileged timestamp check as a fast local hint, but do
+- [x] Keep the current unprivileged timestamp check as a fast local hint, but do
       not label a profile “verified” when only timestamps were checked.
-- [ ] Clearly distinguish external edits, interrupted transactions, manual edits
+- [x] Clearly distinguish external edits, interrupted transactions, manual edits
       and intentional Off.
 
 ### Safe local exceptions for specific machines
@@ -43,11 +45,11 @@ Recommended design:
 Needed so a machine-specific interface, subnet or management path can survive a
 profile reset without publishing private network details.
 
-- [ ] Local-only exception file owned by root, outside Git.
-- [ ] Validate interface names, addresses and ports before applying.
-- [ ] Show local exceptions in the profile preview and active-profile details.
-- [ ] Never upload or include the local exception file in diagnostics/releases.
-- [ ] Test that a profile apply reports exactly which local exceptions are kept
+- [x] Local-only exception file owned by root, outside Git.
+- [x] Validate interface names, addresses and ports before applying.
+- [x] Show local exceptions in the profile preview and active-profile details.
+- [x] Never upload or include the local exception file in diagnostics/releases.
+- [x] Test that a profile apply reports exactly which local exceptions are kept
       or removed.
 
 ### Full GUI/PolicyKit and recovery verification
@@ -58,11 +60,11 @@ profile reset without publishing private network details.
 - [ ] Test safe mode and restore of a specific historical backup with the 0.1.8
       backup layout.
 - [ ] Test a pending transaction at logout, GUI crash and forced kill.
-- [ ] Add a visible recovery path if the helper or PolicyKit agent disappears.
+- [x] Add a visible recovery path if the helper or PolicyKit agent disappears.
 
 ### Firmware safety before broader use
 
-- [ ] Do not offer a firmware action without a selected device and visible
+- [x] Do not offer a firmware action without a selected device and visible
       current/new version.
 - [ ] Enforce AC/battery, dock/USB, reboot and recovery prerequisites from fwupd
       flags where available.
@@ -75,23 +77,23 @@ profile reset without publishing private network details.
 
 ### Firewall and profiles
 
-- [ ] Preview a profile diff before applying: added, removed and retained rules.
-- [ ] Define a real difference between Medium and Hard, or merge them.
+- [x] Preview a profile diff before applying: added, removed and retained rules.
+- [x] Define a real difference between Medium and Hard, or merge them.
 - [ ] Give Gaming an explicit duration and automatic return to the previous
       profile, surviving GUI exit.
-- [ ] Add a one-click “restore this specific backup” list instead of only latest.
+- [x] Add a one-click “restore this specific backup” list instead of only latest.
 - [ ] Preserve/restore exact directory contents, including removal of stale
       `applications.d` entries, without deleting unrelated files.
-- [ ] Add a shared UFW operation lock for all write paths, not only profiles.
-- [ ] Add an audit history of profile changes, rule changes, restores and
+- [x] Add a shared UFW operation lock for all write paths, not only profiles.
+- [x] Add an audit history of profile changes, rule changes, restores and
       failures with bounded retention and useful command results.
-- [ ] Add a persistent result panel with copy/export of privileged output.
-- [ ] Make the profile buttons and active banner remain usable during status
+- [x] Add a persistent result panel with copy/export of privileged output.
+- [x] Make the profile buttons and active banner remain usable during status
       refresh without consuming the rollback window.
 
 ### Access and diagnostics
 
-- [ ] Show the likely management path before a profile change: current SSH
+- [x] Show the likely management path before a profile change: current SSH
       interfaces, Tailscale state and which profile rule would preserve access.
 - [ ] Add “Why is this port reachable?” combining listening socket, binding,
       UFW rule and Docker port publishing, with explicit unknowns.
@@ -118,7 +120,7 @@ profile reset without publishing private network details.
 ## P2 — polish and broader validation
 
 - [ ] Add search/filter for rules, ports, packages and containers.
-- [ ] Make Overview cards open the relevant view.
+- [x] Make Overview cards open the relevant view.
 - [ ] Add active-profile and data-age details to the NIRUBAR tooltip.
 - [ ] Add NIRULAUNCHER actions/deep links for firewall, updates and firmware.
 - [ ] Add web links for safe NIRUX documentation from the relevant views.
@@ -129,7 +131,7 @@ profile reset without publishing private network details.
       builds, including child-process and file-descriptor counts.
 - [ ] Complete live matrix testing on Arch, Debian and Void for helper,
       PolicyKit, logs, updates, firmware discovery and UFW variants.
-- [ ] Add automated tests for profile state persistence, interrupted
+- [x] Add automated tests for profile state persistence, interrupted
       transactions, policy-file parsing and stale rule deletion.
 
 ## Release/deployment rules for the remaining work
