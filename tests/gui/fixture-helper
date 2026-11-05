@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+# Test-only stand-in for the root helper (NIRUSEC_HELPER=this file).
+# Never installed; returns canned JSON so the GUI can be screenshot in Xvfb.
+import json, sys, time
+op = sys.argv[1] if len(sys.argv) > 1 else ""
+now = int(time.time())
+rules = """Status: active
+
+     To                         Action      From
+     --                         ------      ----
+[ 1] Anywhere on lo             ALLOW IN    Anywhere
+[ 2] Anywhere on tailscale0     ALLOW IN    Anywhere
+[ 3] 41641/udp                  ALLOW IN    Anywhere
+[ 4] 22/tcp                     ALLOW IN    192.168.0.0/16
+[ 5] 22/tcp                     ALLOW IN    10.0.0.0/8
+[ 6] 53317                      ALLOW IN    192.168.0.0/16             # localsend
+[ 7] Anywhere (v6) on lo        ALLOW IN    Anywhere (v6)
+[ 8] Anywhere (v6) on tailscale0 ALLOW IN    Anywhere (v6)
+[ 9] 41641/udp (v6)             ALLOW IN    Anywhere (v6)
+[10] 22/tcp                     ALLOW IN    fd00::/8
+"""
+if op == "ufw-status":
+    data = {
+        "running": True,
+        "added": ["allow in on lo", "allow in on tailscale0", "allow 41641/udp",
+                  "allow from 192.168.0.0/16 to any port 22 proto tcp",
+                  "allow from 10.0.0.0/8 to any port 22 proto tcp",
+                  "allow from 192.168.0.0/16 to any port 53317 comment 'localsend'",
+                  "allow from fd00::/8 to any port 22 proto tcp"],
+        "drift": [],
+        "history": [
+            {"at": now - 600, "kind": "profile", "description": "switch to the Medium profile", "result": "kept", "backup": "/var/backups/nirusec/ufw-1-1"},
+            {"at": now - 300, "kind": "rule-add", "description": "Allow LocalSend (53317/tcp+udp) from the local network (kept on every profile)", "result": "done", "backup": "/var/backups/nirusec/ufw-2-2"},
+        ],
+        "exceptions": [{"action": "allow", "protocol": "any", "port": "53317", "source": "192.168.0.0/16", "interface": "", "comment": "localsend"}],
+        "boot_enabled": True,
+        "unresolved": [],
+        "backups": ["ufw-2-2", "ufw-1-1"],
+    }
+    print(json.dumps({"ok": True, "message": "Firewall status checked", "status": rules, "data": data}))
+else:
+    print(json.dumps({"ok": True, "message": f"fixture: {op} done", "token": "0" * 32 if op == "profile-apply" else None}))

@@ -1,15 +1,272 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+<!--
+  NIRUSEC privilege boundary: one action per helper operation.
+
+  pkexec uses the FIRST action (in polkitd enumeration order) whose exec.path
+  matches and whose exec.argv1 matches or is unset. Every action therefore
+  names its argv1; there is deliberately no path-only catch-all, which could
+  shadow these. Unknown operations fall back to org.freedesktop.policykit.exec
+  (administrator authentication) and are rejected by the helper.
+
+  Changes need administrator authentication every time (no auth_admin_keep),
+  so another program running as the same user cannot reuse a recent password
+  entry. Reading status, and keeping/undoing a change that the same GUI just
+  started (random token), are allowed for the active local session only.
+-->
 <policyconfig>
   <vendor>NIRU</vendor>
-  <action id="se.nirucon.nirusec.manage">
-    <description>Manage firewall, updates and firmware</description>
-    <message>Authentication is required to change system security settings or packages.</message>
+
+  <action id="se.nirucon.nirusec.status">
+    <description>Read the firewall status</description>
+    <message>Authentication is required to read the firewall rules.</message>
     <defaults>
-      <allow_active>auth_admin_keep</allow_active>
+      <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
     </defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">ufw-status</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.confirm">
+    <description>Keep a firewall change you just made</description>
+    <message>Authentication is required to keep the firewall change.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">tx-confirm</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.undo">
+    <description>Undo a firewall change you just made</description>
+    <message>Authentication is required to undo the firewall change.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">tx-undo</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.profile">
+    <description>Switch the firewall profile</description>
+    <message>Authentication is required to switch the firewall profile.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">profile-apply</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.rules-add">
+    <description>Add firewall rules</description>
+    <message>Authentication is required to add firewall rules.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">rules-add</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.rule-delete">
+    <description>Remove a firewall rule</description>
+    <message>Authentication is required to remove a firewall rule.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">rule-delete</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.enable">
+    <description>Turn the firewall on</description>
+    <message>Authentication is required to turn the firewall on.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">ufw-enable</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.disable">
+    <description>Turn the firewall off</description>
+    <message>Authentication is required to turn the firewall off.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">ufw-disable</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.default">
+    <description>Change the default firewall policy</description>
+    <message>Authentication is required to change the default firewall policy.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">ufw-default</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.restore">
+    <description>Restore earlier firewall settings</description>
+    <message>Authentication is required to restore earlier firewall settings.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">backup-restore</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.resolve">
+    <description>Keep or restore an unconfirmed firewall change</description>
+    <message>Authentication is required to keep or restore the unconfirmed firewall change.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">tx-resolve</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.exception-remove">
+    <description>Stop keeping a local firewall exception</description>
+    <message>Authentication is required to change the local firewall exceptions.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">exception-remove</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.safe-mode">
+    <description>Emergency firewall safe mode</description>
+    <message>Authentication is required to reset the firewall to emergency safe mode.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">safe-mode</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.restore-latest">
+    <description>Restore the latest firewall backup</description>
+    <message>Authentication is required to restore the latest firewall backup.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">restore-ufw</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.legacy-add">
+    <description>Add a firewall rule</description>
+    <message>Authentication is required to add a firewall rule.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">ufw-add</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.legacy-delete">
+    <description>Remove a firewall rule</description>
+    <message>Authentication is required to remove a firewall rule.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">ufw-delete</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.legacy-confirm">
+    <description>Keep a firewall profile</description>
+    <message>Authentication is required to keep the firewall profile.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">profile-confirm</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.legacy-restore">
+    <description>Restore the previous firewall</description>
+    <message>Authentication is required to restore the previous firewall.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">restore-transaction</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.update">
+    <description>Install system updates</description>
+    <message>Authentication is required to install system package updates.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">update</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.firmware-install">
+    <description>Install firmware packages</description>
+    <message>Authentication is required to install the recommended firmware packages.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">firmware-install</annotate>
+  </action>
+
+  <action id="se.nirucon.nirusec.firmware-update">
+    <description>Flash device firmware</description>
+    <message>Authentication is required to flash firmware on the selected device.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/nirusec-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">firmware-update</annotate>
   </action>
 </policyconfig>

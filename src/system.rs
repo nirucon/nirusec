@@ -7,8 +7,7 @@ use std::{
     collections::HashMap,
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Output},
 };
 
@@ -120,6 +119,11 @@ fn read_key_file(path: &str) -> HashMap<String, String> {
 }
 
 fn firewall_rules() -> (bool, Vec<FirewallRule>, Option<String>) {
+    if unsafe { libc::geteuid() } != 0 {
+        // Reading rules needs root; the GUI asks the helper instead of
+        // spawning a UFW process that can only fail.
+        return (false, Vec::new(), None);
+    }
     match command("ufw", &["status", "numbered"], 5) {
         Ok(text) => (true, ufw::parse_rules(&text), None),
         Err(error) => (false, Vec::new(), Some(error)),
@@ -130,6 +134,24 @@ pub fn ufw_enabled_from_config() -> Option<bool> {
     read_key_file("/etc/ufw/ufw.conf")
         .get("ENABLED")
         .map(|value| value.eq_ignore_ascii_case("yes"))
+}
+
+fn ufw_boot_enabled() -> Option<bool> {
+    if Path::new("/run/systemd/system").is_dir() {
+        let output = run_with_timeout("systemctl", &["is-enabled", "ufw"], 3).ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        return Some(matches!(
+            text.trim(),
+            "enabled" | "static" | "alias" | "linked"
+        ));
+    }
+    if Path::new("/etc/sv/ufw").is_dir() {
+        return Some(
+            Path::new("/var/service/ufw").exists()
+                || Path::new("/etc/runit/runsvdir/default/ufw").exists(),
+        );
+    }
+    None
 }
 
 pub fn firewall_status() -> FirewallStatus {
@@ -155,6 +177,9 @@ pub fn firewall_status() -> FirewallStatus {
         rules_available,
         rules,
         error: rules_error,
+        running: None,
+        boot_enabled: ufw_boot_enabled(),
+        added: Vec::new(),
     }
 }
 
@@ -708,9 +733,26 @@ pub fn collect() -> Status {
     let firmware = firmware_status();
     let docker = docker_status();
     let logs = logs_status();
+    let access = access_status(&ports);
     let mut errors = Vec::new();
     if let Some(error) = &ports_error {
         errors.push(error.clone());
+    }
+    if profile.unresolved() {
+        errors.push(format!(
+            "firewall: {}",
+            if profile.message.is_empty() {
+                "a change waits for confirmation"
+            } else {
+                &profile.message
+            }
+        ));
+    }
+    if firewall.enabled == Some(true) && firewall.boot_enabled == Some(false) {
+        errors.push(
+            "firewall: UFW is on, but its boot service is disabled; it will be off after a reboot"
+                .into(),
+        );
     }
     if !firewall.installed {
         errors.push("UFW is not installed".into());
@@ -778,156 +820,21 @@ pub fn collect() -> Status {
         firmware,
         docker,
         logs,
+        access,
         errors,
     }
 }
 
-fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
-    fs::create_dir_all(target).map_err(|e| e.to_string())?;
-    if let Ok(metadata) = fs::metadata(source) {
-        let _ = fs::set_permissions(target, metadata.permissions());
-    }
-    for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        let destination = target.join(entry.file_name());
-        if path.is_dir() {
-            copy_tree(&path, &destination)?;
-        } else {
-            fs::copy(&path, &destination).map_err(|e| e.to_string())?;
+fn access_status(ports: &[Port]) -> AccessStatus {
+    let mut status = AccessStatus::default();
+    crate::access::ssh_listener(ports, &mut status);
+    if status.ssh_listening {
+        if let Ok(text) = command("ss", &["-Htn", "state", "established"], 3) {
+            crate::access::count_ssh_sessions(&text, &mut status);
         }
     }
-    Ok(())
-}
-
-/// Back up `/etc/ufw` and `/etc/default/ufw` before a recovery action.
-/// Backups are root-only and never placed in a repository or user cache.
-pub fn backup_ufw() -> Result<PathBuf, String> {
-    let root = PathBuf::from("/var/backups/nirusec");
-    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let target = root.join(format!("ufw-{stamp}-{}", std::process::id()));
-    fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-    fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
-    copy_tree(Path::new("/etc/ufw"), &target.join("ufw"))?;
-    if Path::new("/etc/default/ufw").is_file() {
-        fs::copy("/etc/default/ufw", target.join("default-ufw")).map_err(|e| e.to_string())?;
-    }
-    let mut backups: Vec<PathBuf> = fs::read_dir(&root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with("ufw-"))
-        })
-        .collect();
-    backups.sort();
-    while backups.len() > 8 {
-        let old = backups.remove(0);
-        let _ = fs::remove_dir_all(old);
-    }
-    Ok(target)
-}
-
-fn backup_enabled(path: &Path) -> Option<bool> {
-    let conf = if path.join("ufw").is_dir() {
-        path.join("ufw/ufw.conf")
-    } else {
-        path.join("ufw.conf")
-    };
-    read_key_file(conf.to_str().unwrap_or("/etc/ufw/ufw.conf"))
-        .get("ENABLED")
-        .map(|value| value.eq_ignore_ascii_case("yes"))
-}
-
-/// Restore a specific NIRUSEC UFW backup, including `/etc/default/ufw`.
-/// The caller can force the previous enabled state; otherwise it is taken from
-/// the backup. A previously disabled firewall is never silently enabled.
-pub fn restore_backup(path: &Path, force_enabled: Option<bool>) -> Result<String, String> {
-    if !path.is_dir() {
-        return Err(format!("backup does not exist: {}", path.display()));
-    }
-    let enabled = force_enabled.or_else(|| backup_enabled(path));
-    let ufw_tree = if path.join("ufw").is_dir() {
-        path.join("ufw")
-    } else {
-        path.to_path_buf()
-    };
-    run_root_command("ufw", &["--force", "disable"])?;
-    copy_tree(&ufw_tree, Path::new("/etc/ufw"))?;
-    let default_backup = path.join("default-ufw");
-    if default_backup.is_file() {
-        fs::copy(&default_backup, "/etc/default/ufw").map_err(|e| e.to_string())?;
-    }
-    let output = if enabled == Some(true) {
-        run_root_command("ufw", &["--force", "enable"])?
-    } else {
-        run_root_command("ufw", &["--force", "disable"])?
-    };
-    let mut message = format!(
-        "restored {} (firewall was {})",
-        path.display(),
-        if enabled == Some(true) {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
-    if !output.is_empty() {
-        message.push('\n');
-        message.push_str(&output);
-    }
-    Ok(message)
-}
-
-/// Emergency recovery: preserve the current UFW files, apply a small
-/// management-safe policy and leave SSH reachable. This is intentionally more
-/// open than normal profiles; run it from a local console or trusted SSH path.
-pub fn safe_mode() -> Result<String, String> {
-    let backup = backup_ufw()?;
-    let mut log = format!("backup {}\n", backup.display());
-    for args in [
-        vec!["--force", "reset"],
-        vec!["default", "deny", "incoming"],
-        vec!["default", "allow", "outgoing"],
-        vec!["allow", "in", "on", "lo"],
-        vec!["allow", "in", "on", "tailscale0"],
-        vec!["allow", "22/tcp"],
-        vec!["allow", "41641/udp"],
-        vec!["--force", "enable"],
-    ] {
-        log.push_str(&run_root_command("ufw", &args)?);
-        log.push('\n');
-    }
-    Ok(format!("{log}Safe mode active. Current UFW files were backed up. SSH is reachable on port 22; Tailscale is trusted."))
-}
-
-pub fn latest_backup() -> Option<PathBuf> {
-    let root = PathBuf::from("/var/backups/nirusec");
-    let mut backups: Vec<PathBuf> = fs::read_dir(&root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with("ufw-"))
-        })
-        .collect();
-    backups.sort();
-    backups.pop()
-}
-
-pub fn restore_ufw() -> Result<String, String> {
-    let Some(latest) = latest_backup() else {
-        return Err("no NIRUSEC UFW backup exists".into());
-    };
-    restore_backup(&latest, None)
+    status.tailscale_up = !tailscale_networks().is_empty();
+    status
 }
 
 fn package_install_command(packages: &[String]) -> Result<(), String> {
@@ -936,7 +843,14 @@ fn package_install_command(packages: &[String]) -> Result<(), String> {
     }
     let (program, args): (&str, Vec<&str>) = match distro() {
         "debian" => {
-            let mut args = vec!["install", "-y"];
+            let mut args = vec![
+                "-o",
+                "Dpkg::Options::=--force-confdef",
+                "-o",
+                "Dpkg::Options::=--force-confold",
+                "install",
+                "-y",
+            ];
             args.extend(packages.iter().map(String::as_str));
             ("apt-get", args)
         }
@@ -952,9 +866,9 @@ fn package_install_command(packages: &[String]) -> Result<(), String> {
         }
         _ => return Err("no supported package manager".into()),
     };
-    let output = Command::new(program)
+    let output = ufw::clean_command(program)
         .args(args)
-        .env("LC_ALL", "C")
+        .env("DEBIAN_FRONTEND", "noninteractive")
         .output()
         .map_err(|e| format!("{program}: {e}"))?;
     if output.status.success() {
@@ -987,7 +901,19 @@ pub fn update_packages() -> HelperResponse {
         if let Err(error) = update {
             return ufw::failure(&error);
         }
-        let upgrade = run_root_command("apt-get", &["-y", "upgrade"]);
+        // Keep locally modified configuration files instead of failing on a
+        // conffile prompt (stdin is closed in the helper).
+        let upgrade = run_root_command(
+            "apt-get",
+            &[
+                "-o",
+                "Dpkg::Options::=--force-confdef",
+                "-o",
+                "Dpkg::Options::=--force-confold",
+                "-y",
+                "upgrade",
+            ],
+        );
         return match upgrade {
             Ok(output) => ufw::success("System packages updated", Some(output)),
             Err(error) => ufw::failure(&error),
@@ -1000,9 +926,8 @@ pub fn update_packages() -> HelperResponse {
 }
 
 pub(crate) fn run_root_command(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
+    let output = ufw::clean_command(program)
         .args(args)
-        .env("LC_ALL", "C")
         .env("DEBIAN_FRONTEND", "noninteractive")
         .output()
         .map_err(|e| format!("{program}: {e}"))?;
@@ -1016,39 +941,14 @@ pub(crate) fn run_root_command(program: &str, args: &[&str]) -> Result<String, S
     }
 }
 
-pub fn update_firmware(device: Option<&str>) -> HelperResponse {
+/// Flash one explicitly selected device. There is no "update everything".
+pub fn update_firmware(device: &str) -> HelperResponse {
     if !command_exists("fwupdmgr") {
         return ufw::failure("fwupd is not installed");
     }
-    let mut args = vec!["update", "--no-reboot-check", "-y"];
-    if let Some(device) = device {
-        args.push(device);
-    }
+    let args = vec!["update", "--no-reboot-check", "-y", device];
     match run_root_command("fwupdmgr", &args) {
-        Ok(output) => ufw::success(
-            if device.is_some() {
-                "Selected device firmware update completed"
-            } else {
-                "Device firmware update completed"
-            },
-            Some(output),
-        ),
+        Ok(output) => ufw::success("Selected device firmware update completed", Some(output)),
         Err(error) => ufw::failure(&error),
     }
-}
-
-pub fn helper_command(op: &str) -> HelperResponse {
-    match op {
-        "ufw-status" => ufw::status(),
-        "ufw-enable" => ufw::set_enabled(true),
-        "ufw-disable" => ufw::set_enabled(false),
-        "update" => update_packages(),
-        "firmware-install" => install_firmware(),
-        "firmware-update" => update_firmware(None),
-        _ => ufw::failure("unknown helper operation"),
-    }
-}
-
-pub fn state_is_critical(status: &Status) -> bool {
-    status.state == "critical"
 }

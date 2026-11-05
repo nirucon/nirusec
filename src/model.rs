@@ -21,6 +21,8 @@ pub struct FirewallRule {
     pub source: String,
     pub comment: String,
     pub raw: String,
+    /// The IPv6 half of a rule (UFW lists IPv4 and IPv6 rules separately).
+    pub v6: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -34,6 +36,12 @@ pub struct FirewallStatus {
     pub rules_available: bool,
     pub rules: Vec<FirewallRule>,
     pub error: Option<String>,
+    /// Runtime state from `ufw status` (root only); `enabled` is the config.
+    pub running: Option<bool>,
+    /// Whether the UFW boot service is enabled (systemd unit or runit link).
+    pub boot_enabled: Option<bool>,
+    /// `ufw show added` lines (root only), used for exact profile previews.
+    pub added: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,6 +56,18 @@ pub struct ProfileStatus {
     pub pending_token: Option<String>,
     pub changed_after: bool,
     pub message: String,
+    /// Profile the current custom configuration is based on.
+    pub base: String,
+    /// Plain-language description of the pending or last change.
+    pub change: String,
+    /// `Some(true)` only after a root check compared the live UFW files with
+    /// the snapshot taken when NIRUSEC last changed them.
+    pub verified: Option<bool>,
+    pub verified_at: i64,
+    /// Files that differ from the NIRUSEC snapshot (root check only).
+    pub drift: Vec<String>,
+    /// Number of local exceptions kept on every profile.
+    pub exceptions: usize,
 }
 
 impl Default for ProfileStatus {
@@ -62,14 +82,59 @@ impl Default for ProfileStatus {
             pending_token: None,
             changed_after: false,
             message: String::new(),
+            base: String::new(),
+            change: String::new(),
+            verified: None,
+            verified_at: 0,
+            drift: Vec::new(),
+            exceptions: 0,
         }
     }
 }
 
 impl ProfileStatus {
+    /// A rollback window is open (with or without a token in this GUI).
     pub fn pending(&self) -> bool {
-        self.state == "pending" && self.pending_token.is_some()
+        self.state == "pending"
     }
+
+    /// States that block further changes until the user keeps or restores.
+    pub fn unresolved(&self) -> bool {
+        matches!(
+            self.state.as_str(),
+            "pending" | "expired" | "interrupted" | "rollback_failed"
+        )
+    }
+}
+
+/// Management paths into this machine. Only counts and classes are stored,
+/// never peer addresses.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AccessStatus {
+    pub ssh_listening: bool,
+    pub ssh_scope: String,
+    pub ssh_sessions_tailscale: u32,
+    pub ssh_sessions_lan: u32,
+    pub ssh_sessions_public: u32,
+    pub tailscale_up: bool,
+}
+
+impl AccessStatus {
+    pub fn ssh_sessions(&self) -> u32 {
+        self.ssh_sessions_tailscale + self.ssh_sessions_lan + self.ssh_sessions_public
+    }
+}
+
+/// One entry of the root-owned firewall change history.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistoryEntry {
+    pub at: i64,
+    pub kind: String,
+    pub description: String,
+    pub result: String,
+    pub backup: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -164,5 +229,7 @@ pub struct Status {
     pub firmware: FirmwareStatus,
     pub docker: DockerStatus,
     pub logs: LogsStatus,
+    #[serde(default)]
+    pub access: AccessStatus,
     pub errors: Vec<String>,
 }

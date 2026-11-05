@@ -3,7 +3,7 @@ mod helper;
 mod theme;
 
 use app::View;
-use nirusec::{cache, model::Status, system};
+use nirusec::{cache, firewall, model::Status, system};
 
 const HELP: &str = "NIRUSEC — NIRUX firewall, update and firmware GUI
 
@@ -11,6 +11,9 @@ Usage:
   nirusec [--open overview|firewall|ports|logs|updates|firmware|docker]
   nirusec --check [--if-stale SECONDS] [--quiet]
   nirusec --status [--json]
+  nirusec --profile-rules soft|medium|hard|gaming
+                                  print the exact UFW rules of a profile
+  nirusec --profile-state         print the recorded firewall profile state
   sudo /usr/local/libexec/nirusec-helper safe-mode
                                   emergency local-console recovery
   sudo /usr/local/libexec/nirusec-helper restore-ufw
@@ -100,7 +103,7 @@ fn main() {
             eprintln!("nirusec --safe-mode must run as root (use sudo from a local console)");
             std::process::exit(1);
         }
-        match system::safe_mode() {
+        match firewall::safe_mode() {
             Ok(message) => println!("{message}"),
             Err(error) => {
                 eprintln!("nirusec: safe mode failed: {error}");
@@ -114,13 +117,39 @@ fn main() {
             eprintln!("nirusec --restore-ufw must run as root");
             std::process::exit(1);
         }
-        match system::restore_ufw() {
+        match firewall::restore_latest() {
             Ok(message) => println!("{message}"),
             Err(error) => {
                 eprintln!("nirusec: restore failed: {error}");
                 std::process::exit(1);
             }
         }
+        return;
+    }
+    if let Some(name) = args
+        .windows(2)
+        .find(|window| window[0] == "--profile-rules")
+        .map(|window| window[1].clone())
+    {
+        let Some(profile) = nirusec::profiles::Profile::parse(&name) else {
+            eprintln!("nirusec: unknown profile {name}");
+            std::process::exit(2);
+        };
+        let exceptions = nirusec::profiles::load_exceptions().unwrap_or_default();
+        println!("# {} — {}", profile.label(), profile.purpose());
+        println!("# default deny incoming, allow outgoing");
+        for line in
+            nirusec::profiles::expected_added(profile, nirusec::tx::ipv6_enabled(), &exceptions)
+        {
+            println!("ufw {line}");
+        }
+        return;
+    }
+    if args.iter().any(|arg| arg == "--profile-state") {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&nirusec::profiles::read_status()).unwrap_or_default()
+        );
         return;
     }
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {

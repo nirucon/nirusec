@@ -130,8 +130,8 @@ sudo install -D -m 0755 "$BIN_SRC" "$HELPER"
 sudo install -D -m 0644 assets/se.nirucon.nirusec.policy "$POLICY"
 need pkexec || die 'pkexec (PolicyKit) is required for privileged firewall and update actions'
 if need pkaction; then
-    pkaction --action-id se.nirucon.nirusec.manage >/dev/null 2>&1 \
-        || say 'warning: PolicyKit has not loaded se.nirucon.nirusec.manage yet; verify after the next login if authentication fails'
+    pkaction --action-id se.nirucon.nirusec.status >/dev/null 2>&1 \
+        || say 'warning: PolicyKit has not loaded se.nirucon.nirusec.status yet; verify after the next login if authentication fails'
 fi
 
 if need update-desktop-database; then update-desktop-database "$APPDIR" >/dev/null 2>&1 || :; fi
