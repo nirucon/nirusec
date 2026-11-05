@@ -18,8 +18,11 @@ shoot() { # shoot NAME WIDTH HEIGHT [ARGS...]
     "$bin" "$@" & local pid=$!
     local wid=""
     for _ in $(seq 1 50); do wid=$(xdotool search --pid "$pid" 2>/dev/null | head -1 || true); [ -n "$wid" ] && break; sleep 0.2; done
-    xdotool windowsize "$wid" "$w" "$h"; sleep 2.5
-    import -window "$wid" "$out/$name.png"
+    [ -n "$wid" ] || { echo "no window for $name" >&2; kill "$pid"; return 1; }
+    xdotool windowmove "$wid" 0 0 windowsize "$wid" "$w" "$h"; sleep 3
+    kill -0 "$pid" || { echo "GUI exited early ($name)" >&2; return 1; }
+    # Capture the root window (works without a window manager) and crop.
+    import -window root -crop "${w}x${h}+0+0" +repage "$out/$name.png"
     kill "$pid"; wait "$pid" 2>/dev/null || true
 }
 echo '{"schema":2,"id":"soft","label":"Soft","state":"kept","confirmed_at":'"$(date +%s)"',"exceptions":1}' > "$state/state.json"
