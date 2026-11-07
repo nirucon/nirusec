@@ -151,6 +151,8 @@ preview shows them.
 
 ## Uninstall
 
+With NIRUX: `nirux extras uninstall nirusec` runs the uninstaller below from the pinned release.
+
 ```sh
 ./uninstall.sh
 ```
