@@ -68,7 +68,8 @@ nirux extras update            # later, for the extras you selected
 ```
 
 NIRUX downloads the pinned release tag, verifies it and runs NIRUSEC's own
-installer, which fetches the prebuilt binary; nothing is compiled.
+installer, which fetches the prebuilt binary; nothing is compiled. In NIRUX,
+`nirux manual nirusec` opens the short tour in the NIRUX manual.
 
 ### Standalone
 
