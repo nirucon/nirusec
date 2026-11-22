@@ -1,8 +1,7 @@
-use crate::theme::{self, Palette, Theme, Watcher};
-use egui::{
-    Align, Button, Color32, Context, Frame, Grid, Layout, RichText, ScrollArea, Stroke, TextEdit,
-    Ui, Vec2,
-};
+use crate::gui::canvas::Rect;
+use crate::gui::shell::{App, Waker};
+use crate::gui::theme::Palette;
+use crate::gui::ui::{keys, Btn, Frame, KeyEv, State, Sz, Ui};
 use nirusec::{
     access::{self, Eval, Origin},
     cache,
@@ -19,6 +18,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+const SCROLL: &str = "nirusec-content";
 
 const POLICY_FILE: &str = "/usr/share/polkit-1/actions/se.nirucon.nirusec.policy";
 
@@ -250,8 +251,8 @@ enum Job {
 pub struct NirusecApp {
     status: Status,
     view: View,
-    theme: Theme,
-    theme_watcher: Option<Watcher>,
+    waker: Waker,
+    modal_h: i32,
     tx: Sender<Job>,
     rx: Receiver<Job>,
     status_busy: bool,
@@ -333,7 +334,7 @@ fn fmt_time(at: i64) -> String {
         .unwrap_or_default()
 }
 
-fn level_color(level: Level, pal: &Palette) -> Color32 {
+fn level_color(level: Level, pal: &Palette) -> u32 {
     match level {
         Level::Good => pal.success,
         Level::Warning => pal.warning,
@@ -343,15 +344,13 @@ fn level_color(level: Level, pal: &Palette) -> Color32 {
 }
 
 impl NirusecApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, initial_view: Option<View>) -> Self {
-        let theme = theme::load();
-        theme::apply(&cc.egui_ctx, &theme);
+    pub fn new(initial_view: Option<View>, waker: Waker) -> Self {
         let (tx, rx) = mpsc::channel();
         let mut app = Self {
             status: cache::load().unwrap_or_default(),
             view: initial_view.unwrap_or(View::Overview),
-            theme,
-            theme_watcher: Some(Watcher::start(cc.egui_ctx.clone())),
+            waker,
+            modal_h: 0,
             tx,
             rx,
             status_busy: false,
@@ -375,7 +374,7 @@ impl NirusecApp {
         app.status.firewall.rules.clear();
         app.status.firewall.rules_available = false;
         if app.status.checked_at == 0 || cache::age_seconds(&app.status) > 300 {
-            app.refresh_status(&cc.egui_ctx);
+            app.refresh_status();
         }
         // Screenshot tests with a fixture helper can open a profile preview.
         if std::env::var_os("NIRUSEC_HELPER").is_some() {
@@ -390,20 +389,20 @@ impl NirusecApp {
         app
     }
 
-    fn refresh_status(&mut self, ctx: &Context) {
+    fn refresh_status(&mut self) {
         if self.status_busy {
             return;
         }
         self.status_busy = true;
         let tx = self.tx.clone();
-        let ctx = ctx.clone();
+        let waker = self.waker;
         let result = thread::Builder::new()
             .name("nirusec-status".into())
             .spawn(move || {
                 let status = system::collect();
                 let _ = cache::write(&status);
                 let _ = tx.send(Job::Status(Box::new(status)));
-                ctx.request_repaint();
+                waker.wake();
             });
         if let Err(error) = result {
             self.status_busy = false;
@@ -411,7 +410,7 @@ impl NirusecApp {
         }
     }
 
-    fn run_helper(&mut self, ctx: &Context, op: &'static str, args: Vec<String>) {
+    fn run_helper(&mut self, op: &'static str, args: Vec<String>) {
         if self.helper_busy {
             return;
         }
@@ -420,13 +419,13 @@ impl NirusecApp {
             self.message = Some(("Working… (a password dialog may appear)".into(), false));
         }
         let tx = self.tx.clone();
-        let ctx = ctx.clone();
+        let waker = self.waker;
         let result = thread::Builder::new()
             .name("nirusec-helper".into())
             .spawn(move || {
                 let result = run_helper_blocking(op, &args);
                 let _ = tx.send(Job::Helper(op, result));
-                ctx.request_repaint();
+                waker.wake();
             });
         if let Err(error) = result {
             self.helper_busy = false;
@@ -434,8 +433,8 @@ impl NirusecApp {
         }
     }
 
-    fn check_firewall(&mut self, ctx: &Context) {
-        self.run_helper(ctx, "ufw-status", Vec::new());
+    fn check_firewall(&mut self) {
+        self.run_helper("ufw-status", Vec::new());
     }
 
     fn apply_firewall_status(&mut self, response: HelperResponse) {
@@ -481,8 +480,10 @@ impl NirusecApp {
         self.profile = profile;
     }
 
-    fn process_jobs(&mut self, ctx: &Context) {
+    fn process_jobs(&mut self) -> bool {
+        let mut any = false;
         while let Ok(job) = self.rx.try_recv() {
+            any = true;
             match job {
                 Job::Status(status) => {
                     self.status_busy = false;
@@ -526,10 +527,10 @@ impl NirusecApp {
                             // Re-check the firewall right away (no password with
                             // the 0.2 policy); a pending change keeps its window.
                             if self.auto_status && op != "update" && !op.starts_with("firmware") {
-                                self.check_firewall(ctx);
+                                self.check_firewall();
                             }
                             if response.token.is_none() {
-                                self.refresh_status(ctx);
+                                self.refresh_status();
                             }
                         }
                         Err(error) => self.message = Some((error, true)),
@@ -537,6 +538,7 @@ impl NirusecApp {
                 }
             }
         }
+        any
     }
 
     // ---------------------------------------------------------------------
@@ -788,148 +790,127 @@ impl NirusecApp {
     }
 }
 
+fn fr(fill: u32, stroke: u32, width: i32, pad: i32, rad: i32) -> Frame {
+    Frame {
+        fill: Some(fill),
+        stroke,
+        width,
+        pad,
+        rad,
+    }
+}
+
+const VIEWS: [View; 7] = [
+    View::Overview,
+    View::Firewall,
+    View::Ports,
+    View::Logs,
+    View::Updates,
+    View::Firmware,
+    View::Docker,
+];
+
 impl NirusecApp {
-    fn card(&self, ui: &mut Ui, pal: &Palette, title: &str, value: String, detail: &str) {
-        Frame::none()
-            .fill(pal.surface)
-            .stroke(Stroke::new(1.0_f32, pal.border))
-            .rounding(6.0)
-            .inner_margin(10.0)
-            .show(ui, |ui| {
-                ui.set_min_width(210.0);
-                ui.label(RichText::new(title).color(pal.muted).size(11.0));
-                ui.label(
-                    RichText::new(value)
-                        .color(pal.foreground)
-                        .size(18.0)
-                        .strong(),
-                );
-                if !detail.is_empty() {
-                    ui.label(RichText::new(detail).color(pal.disabled).size(10.0));
-                }
-            });
+    fn card(ui: &mut Ui, pal: &Palette, title: &str, value: &str, detail: &str) -> Rect {
+        ui.frame(fr(pal.surface, pal.border, 1, 10, 6), |ui| {
+            ui.label(title, Sz::Small, pal.muted);
+            ui.strong(value, Sz::Heading, pal.foreground);
+            if !detail.is_empty() {
+                ui.label(detail, Sz::Tiny, pal.disabled);
+            }
+        })
+        .1
     }
 
-    fn card_width(
-        &self,
-        ui: &mut Ui,
-        pal: &Palette,
-        width: f32,
-        title: &str,
-        value: String,
-        detail: &str,
-    ) {
-        Frame::none()
-            .fill(pal.surface)
-            .stroke(Stroke::new(1.0_f32, pal.border))
-            .rounding(6.0)
-            .inner_margin(10.0)
-            .show(ui, |ui| {
-                ui.set_width((width - 24.0).max(120.0));
-                ui.label(RichText::new(title).color(pal.muted).size(11.0));
-                ui.label(
-                    RichText::new(value)
-                        .color(pal.foreground)
-                        .size(18.0)
-                        .strong(),
-                );
-                if !detail.is_empty() {
-                    ui.label(RichText::new(detail).color(pal.disabled).size(10.0));
-                }
-            });
+    fn set_view(&mut self, ui: &mut Ui, view: View) {
+        if self.view != view {
+            self.view = view;
+            ui.st.reset_scroll(SCROLL);
+        }
     }
 
     fn ports(&mut self, ui: &mut Ui, pal: &Palette) {
         ui.heading("Listening ports");
-        ui.label(RichText::new("Bound sockets from `ss`. Listening is not the same as being reachable through the firewall.").color(pal.disabled).size(11.0));
-        ui.add_space(6.0);
+        ui.label(
+            "Bound sockets from `ss`. Listening is not the same as being reachable through the firewall.",
+            Sz::Small,
+            pal.disabled,
+        );
+        ui.space(6);
         if self.status.ports.is_empty() {
-            ui.label(RichText::new("No listening sockets reported.").color(pal.disabled));
+            ui.label("No listening sockets reported.", Sz::Body, pal.disabled);
         }
         for port in &self.status.ports {
-            Frame::none()
-                .fill(pal.surface)
-                .stroke(Stroke::new(1.0_f32, pal.border))
-                .rounding(4.0)
-                .inner_margin(8.0)
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "{}:{}/{}",
-                                port.address, port.port, port.protocol
-                            ))
-                            .monospace()
-                            .color(pal.foreground),
-                        );
-                        ui.label(RichText::new(&port.scope).color(if port.scope == "public" {
-                            pal.error
-                        } else if port.scope == "all interfaces" {
-                            pal.warning
-                        } else if port.scope == "Tailscale" {
-                            pal.accent
-                        } else {
-                            pal.muted
-                        }));
-                    });
+            ui.frame(fr(pal.surface, pal.border, 1, 8, 4), |ui| {
+                ui.flow(|ui| {
+                    ui.label(
+                        &format!("{}:{}/{}", port.address, port.port, port.protocol),
+                        Sz::Body,
+                        pal.foreground,
+                    );
+                    let color = if port.scope == "public" {
+                        pal.error
+                    } else if port.scope == "all interfaces" {
+                        pal.warning
+                    } else if port.scope == "Tailscale" {
+                        pal.accent
+                    } else {
+                        pal.muted
+                    };
+                    ui.label(&port.scope, Sz::Body, color);
                 });
+            });
         }
     }
 
     fn logs(&mut self, ui: &mut Ui, pal: &Palette) {
         ui.heading("Firewall logs");
         ui.label(
-            RichText::new(format!(
+            &format!(
                 "Source: {} · {}",
                 self.status.logs.source, self.status.logs.window
-            ))
-            .color(pal.muted)
-            .size(11.0),
+            ),
+            Sz::Small,
+            pal.muted,
         );
         if self.status.logs.truncated {
             ui.label(
-                RichText::new("Only the end of a large log file was read.")
-                    .color(pal.warning)
-                    .size(10.0),
+                "Only the end of a large log file was read.",
+                Sz::Tiny,
+                pal.warning,
             );
         }
         if !self.status.logs.available {
             ui.label(
-                RichText::new(
-                    self.status
-                        .logs
-                        .error
-                        .as_deref()
-                        .unwrap_or("No log data available"),
-                )
-                .color(pal.warning),
+                self.status
+                    .logs
+                    .error
+                    .as_deref()
+                    .unwrap_or("No log data available"),
+                Sz::Body,
+                pal.warning,
             );
             return;
         }
-        ui.horizontal_wrapped(|ui| {
-            self.card(
-                ui,
-                pal,
-                "Blocked",
-                self.status.logs.blocked.to_string(),
-                "last available log window",
-            );
-            self.card(
-                ui,
-                pal,
-                "Allowed",
-                self.status.logs.allowed.to_string(),
-                "last available log window",
-            );
-        });
-        ui.add_space(8.0);
-        ui.label(RichText::new("Most common blocked ports").strong());
-        let height = 22.0 * self.status.logs.top.len().max(1) as f32;
-        let (rect, _) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width().min(700.0), height),
-            egui::Sense::hover(),
+        let (blocked, allowed) = (
+            self.status.logs.blocked.to_string(),
+            self.status.logs.allowed.to_string(),
         );
-        let painter = ui.painter_at(rect);
+        let cols = if ui.width() > 460 { 2 } else { 1 };
+        let cards = [("Blocked", blocked), ("Allowed", allowed)];
+        for chunk in cards.chunks(cols) {
+            ui.columns(cols, 8, |ui, i| {
+                if let Some((title, value)) = chunk.get(i) {
+                    Self::card(ui, pal, title, value, "last available log window");
+                }
+            });
+        }
+        ui.space(8);
+        ui.strong("Most common blocked ports", Sz::Body, pal.foreground);
+        let rows = self.status.logs.top.len().max(1) as i32;
+        let lh = (ui.line_h(Sz::Small) + 8).max(22);
+        let w = ui.width().min(700);
+        let rect = ui.alloc(w, lh * rows);
         let max = self
             .status
             .logs
@@ -939,44 +920,52 @@ impl NirusecApp {
             .max()
             .unwrap_or(1)
             .max(1);
+        let label_w = 130.min(w / 2);
         for (index, entry) in self.status.logs.top.iter().enumerate() {
-            let y = rect.top() + index as f32 * 22.0;
-            let bar = (entry.count as f32 / max as f32) * (rect.width() - 150.0);
-            painter.text(
-                egui::pos2(rect.left(), y + 9.0),
-                egui::Align2::LEFT_CENTER,
-                format!("{} {}/{}", entry.kind, entry.port, entry.protocol),
-                egui::FontId::monospace(11.0),
-                pal.foreground,
-            );
-            painter.rect_filled(
-                egui::Rect::from_min_size(
-                    egui::pos2(rect.left() + 130.0, y + 3.0),
-                    Vec2::new(bar.max(1.0), 12.0),
-                ),
-                2.0,
+            let y = rect.y + index as i32 * lh;
+            let text = format!("{} {}/{}", entry.kind, entry.port, entry.protocol);
+            let text = ui.ellipsize(&text, Sz::Small, label_w - 6);
+            ui.paint_text(rect.x, y + 3, &text, Sz::Small, pal.foreground, false);
+            let room = (rect.w - label_w - 20).max(1);
+            let bar = ((entry.count as f32 / max as f32) * room as f32) as i32;
+            ui.paint_box(
+                Rect::new(rect.x + label_w, y + 3, bar.max(1), 12),
+                2,
+                Some(pal.accent),
                 pal.accent,
+                0,
+            );
+            let n = entry.count.to_string();
+            ui.paint_text(
+                rect.x + label_w + bar.max(1) + 6,
+                y + 1,
+                &n,
+                Sz::Tiny,
+                pal.muted,
+                false,
             );
         }
         if self.status.logs.top.is_empty() {
             ui.label(
-                RichText::new("No blocked port entries in the available log data.")
-                    .color(pal.disabled),
+                "No blocked port entries in the available log data.",
+                Sz::Body,
+                pal.disabled,
             );
         }
     }
 
-    fn updates(&mut self, ui: &mut Ui, ctx: &Context, pal: &Palette) {
+    fn updates(&mut self, ui: &mut Ui, pal: &Palette) {
         ui.heading("System updates");
         ui.label(
-            RichText::new(format!(
+            &format!(
                 "{} · {} available",
                 self.status.updates.manager, self.status.updates.count
-            ))
-            .color(pal.muted),
+            ),
+            Sz::Body,
+            pal.muted,
         );
         if let Some(error) = &self.status.updates.error {
-            ui.label(RichText::new(error).color(pal.warning));
+            ui.label(error, Sz::Body, pal.warning);
         }
         let message = match self.status.updates.manager.as_str() {
             "APT" => "Installs the configured APT upgrade set after refreshing repository metadata. A partial security-only classification is not claimed.",
@@ -984,198 +973,181 @@ impl NirusecApp {
             "XBPS" => "Runs a full XBPS upgrade using the configured repositories and signature checks.",
             _ => "No supported package manager was detected.",
         };
-        ui.label(RichText::new(message).color(pal.disabled).size(11.0));
+        ui.label(message, Sz::Small, pal.disabled);
         if !self.status.updates.packages.is_empty() {
-            ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-                for package in &self.status.updates.packages {
-                    ui.label(
-                        RichText::new(package)
-                            .monospace()
-                            .size(11.0)
-                            .color(pal.foreground),
-                    );
+            let packages = &self.status.updates.packages;
+            ui.scroll_max("nirusec-packages", 240, |ui| {
+                for package in packages {
+                    ui.label(package, Sz::Small, pal.foreground);
                 }
             });
         }
-        ui.add_space(8.0);
-        if ui
-            .add_enabled(
-                !self.helper_busy && self.status.updates.count > 0,
-                Button::new("Install updates…"),
-            )
-            .clicked()
-        {
+        ui.space(8);
+        if ui.button_ex(
+            "Install updates…",
+            Btn::default().enabled(!self.helper_busy && self.status.updates.count > 0),
+        ) {
             self.confirm = Some(Confirm { kind: ConfirmKind::UpdatePackages, title: "Install system updates?".into(), body: "The package manager will run as root. Review the package-manager output and restart if required.".into(), action: "update", commands: Vec::new(), warnings: Vec::new(), danger: false });
         }
-        let _ = ctx;
     }
 
-    fn firmware(&mut self, ui: &mut Ui, ctx: &Context, pal: &Palette) {
+    fn firmware(&mut self, ui: &mut Ui, pal: &Palette) {
         ui.heading("Firmware and microcode");
         ui.label(
-            RichText::new(format!("{} package sources", self.status.firmware.manager))
-                .color(pal.muted),
+            &format!("{} package sources", self.status.firmware.manager),
+            Sz::Body,
+            pal.muted,
         );
-        ui.label(RichText::new("Recommendations are hardware-aware where standard package names make that possible. No repository is silently enabled and no device is flashed by a status check.").color(pal.disabled).size(11.0));
-        ui.add_space(6.0);
+        ui.label("Recommendations are hardware-aware where standard package names make that possible. No repository is silently enabled and no device is flashed by a status check.", Sz::Small, pal.disabled);
+        ui.space(6);
         if self.status.firmware.missing.is_empty() {
             ui.label(
-                RichText::new("No missing recommended firmware packages were detected.")
-                    .color(pal.success),
+                "No missing recommended firmware packages were detected.",
+                Sz::Body,
+                pal.success,
             );
         } else {
-            ui.label(RichText::new("Recommended packages not installed").strong());
+            ui.strong(
+                "Recommended packages not installed",
+                Sz::Body,
+                pal.foreground,
+            );
             for package in &self.status.firmware.missing {
-                ui.label(RichText::new(format!("• {package}")).color(pal.foreground));
+                ui.label(&format!("• {package}"), Sz::Body, pal.foreground);
             }
-            if ui
-                .add_enabled(
-                    !self.helper_busy,
-                    Button::new("Install recommended firmware…"),
-                )
-                .clicked()
-            {
+            if ui.button_ex(
+                "Install recommended firmware…",
+                Btn::default().enabled(!self.helper_busy),
+            ) {
                 self.confirm = Some(Confirm { kind: ConfirmKind::InstallFirmware, title: "Install recommended firmware?".into(), body: "This installs the listed distribution packages only. It does not flash a device.".into(), action: "firmware-install", commands: Vec::new(), warnings: Vec::new(), danger: false });
             }
         }
         if !self.status.firmware.unknown.is_empty() {
             ui.label(
-                RichText::new(
-                    "Package state could not be verified for: ".to_string()
-                        + &self.status.firmware.unknown.join(", "),
-                )
-                .color(pal.warning)
-                .size(11.0),
+                &("Package state could not be verified for: ".to_string()
+                    + &self.status.firmware.unknown.join(", ")),
+                Sz::Small,
+                pal.warning,
             );
         }
-        ui.add_space(8.0);
-        Frame::none().fill(pal.surface).stroke(Stroke::new(1.0_f32, pal.border)).rounding(6.0).inner_margin(10.0).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Device firmware (fwupd)").strong());
-                ui.label(RichText::new(if self.status.firmware.fwupd_available { "installed" } else { "not installed" }).color(if self.status.firmware.fwupd_available { pal.success } else { pal.disabled }));
+        ui.space(8);
+        let mut chosen = None;
+        let busy = self.helper_busy;
+        let fw = &self.status.firmware;
+        ui.frame(fr(pal.surface, pal.border, 1, 10, 6), |ui| {
+            ui.flow(|ui| {
+                ui.strong("Device firmware (fwupd)", Sz::Body, pal.foreground);
+                if fw.fwupd_available {
+                    ui.label("installed", Sz::Body, pal.success);
+                } else {
+                    ui.label("not installed", Sz::Body, pal.disabled);
+                }
             });
-            if self.status.firmware.fwupd_available {
-                ui.label(RichText::new(&self.status.firmware.fwupd_summary).color(pal.muted).size(11.0));
-                if let Some(error) = &self.status.firmware.fwupd_error {
-                    ui.label(RichText::new(error).color(pal.warning).size(11.0));
+            if fw.fwupd_available {
+                ui.label(&fw.fwupd_summary, Sz::Small, pal.muted);
+                if let Some(error) = &fw.fwupd_error {
+                    ui.label(error, Sz::Small, pal.warning);
                 }
-                for device in &self.status.firmware.devices {
-                    Frame::none()
-                        .fill(pal.panel)
-                        .stroke(Stroke::new(1.0_f32, pal.border))
-                        .rounding(4.0)
-                        .inner_margin(6.0)
-                        .show(ui, |ui| {
-                            ui.label(RichText::new(&device.name).strong().color(pal.foreground));
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} → {}",
-                                    if device.current_version.is_empty() {
-                                        "unknown"
-                                    } else {
-                                        &device.current_version
-                                    },
-                                    if device.new_version.is_empty() {
-                                        "available"
-                                    } else {
-                                        &device.new_version
-                                    }
-                                ))
-                                .monospace()
-                                .size(10.0)
-                                .color(pal.muted),
-                            );
-                            if ui
-                                .add_enabled(
-                                    !self.helper_busy,
-                                    Button::new("Install this device update…"),
-                                )
-                                .clicked()
-                            {
-                                self.confirm = Some(Confirm {
-                                    kind: ConfirmKind::UpdateFirmware,
-                                    title: "Install this device firmware?".into(),
-                                    body: format!(
-                                        "fwupd will flash {} ({} → {}). Connect power, close other work and allow the required reboot. Do not interrupt the process.",
-                                        device.name,
-                                        if device.current_version.is_empty() { "unknown" } else { &device.current_version },
-                                        if device.new_version.is_empty() { "available" } else { &device.new_version }
-                                    ),
-                                    action: "firmware-update",
-                                    commands: Vec::new(),
-                                    warnings: Vec::new(),
-                                    danger: true,
-                                });
-                                self.selected_firmware = Some(device.id.clone());
-                            }
-                        });
+                for device in &fw.devices {
+                    ui.frame(fr(pal.panel, pal.border, 1, 6, 4), |ui| {
+                        ui.strong(&device.name, Sz::Body, pal.foreground);
+                        let from = if device.current_version.is_empty() {
+                            "unknown"
+                        } else {
+                            &device.current_version
+                        };
+                        let to = if device.new_version.is_empty() {
+                            "available"
+                        } else {
+                            &device.new_version
+                        };
+                        ui.label(&format!("{from} → {to}"), Sz::Tiny, pal.muted);
+                        if ui
+                            .button_ex("Install this device update…", Btn::default().enabled(!busy))
+                        {
+                            chosen = Some((
+                                device.id.clone(),
+                                device.name.clone(),
+                                from.to_string(),
+                                to.to_string(),
+                            ));
+                        }
+                    });
                 }
-                if self.status.firmware.devices.is_empty() {
-                    ui.label(RichText::new("No supported device updates are available.").color(pal.disabled));
+                if fw.devices.is_empty() {
+                    ui.label(
+                        "No supported device updates are available.",
+                        Sz::Body,
+                        pal.disabled,
+                    );
                 }
             } else {
-                ui.label(RichText::new("Install fwupd from the distribution to manage supported BIOS/device updates.").color(pal.disabled));
+                ui.label(
+                    "Install fwupd from the distribution to manage supported BIOS/device updates.",
+                    Sz::Body,
+                    pal.disabled,
+                );
             }
         });
-        let _ = ctx;
+        if let Some((id, name, from, to)) = chosen {
+            self.confirm = Some(Confirm {
+                kind: ConfirmKind::UpdateFirmware,
+                title: "Install this device firmware?".into(),
+                body: format!(
+                    "fwupd will flash {name} ({from} → {to}). Connect power, close other work and allow the required reboot. Do not interrupt the process."
+                ),
+                action: "firmware-update",
+                commands: Vec::new(),
+                warnings: Vec::new(),
+                danger: true,
+            });
+            self.selected_firmware = Some(id);
+        }
     }
 
     fn docker(&mut self, ui: &mut Ui, pal: &Palette) {
         ui.heading("Docker");
         if !self.status.docker.available {
             ui.label(
-                RichText::new(
-                    self.status
-                        .docker
-                        .error
-                        .as_deref()
-                        .unwrap_or("Docker is unavailable"),
-                )
-                .color(pal.warning),
+                self.status
+                    .docker
+                    .error
+                    .as_deref()
+                    .unwrap_or("Docker is unavailable"),
+                Sz::Body,
+                pal.warning,
             );
-            ui.label(RichText::new("If Docker is installed but not accessible, add the user to the Docker group and start a new session. NIRUSEC never asks for root just to list containers.").color(pal.disabled).size(11.0));
+            ui.label("If Docker is installed but not accessible, add the user to the Docker group and start a new session. NIRUSEC never asks for root just to list containers.", Sz::Small, pal.disabled);
             return;
         }
         if self.status.docker.containers.is_empty() {
             ui.label(
-                RichText::new("Docker is available; no running containers.").color(pal.disabled),
+                "Docker is available; no running containers.",
+                Sz::Body,
+                pal.disabled,
             );
         }
         for container in &self.status.docker.containers {
-            Frame::none()
-                .fill(pal.surface)
-                .stroke(Stroke::new(1.0_f32, pal.border))
-                .rounding(4.0)
-                .inner_margin(8.0)
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            RichText::new(&container.name)
-                                .strong()
-                                .color(pal.foreground),
-                        );
-                        ui.label(RichText::new(&container.status).color(pal.muted));
-                    });
-                    ui.label(
-                        RichText::new(&container.image)
-                            .monospace()
-                            .size(11.0)
-                            .color(pal.muted),
-                    );
-                    if !container.ports.is_empty() {
-                        ui.label(
-                            RichText::new(format!("Ports: {}", container.ports))
-                                .color(pal.warning)
-                                .size(11.0),
-                        );
-                    }
+            ui.frame(fr(pal.surface, pal.border, 1, 8, 4), |ui| {
+                ui.flow(|ui| {
+                    ui.strong(&container.name, Sz::Body, pal.foreground);
+                    ui.label(&container.status, Sz::Body, pal.muted);
                 });
+                ui.label(&container.image, Sz::Small, pal.muted);
+                if !container.ports.is_empty() {
+                    ui.label(
+                        &format!("Ports: {}", container.ports),
+                        Sz::Small,
+                        pal.warning,
+                    );
+                }
+            });
         }
     }
 }
 
 impl NirusecApp {
-    fn status_color(&self, pal: &Palette) -> Color32 {
+    fn status_color(&self, pal: &Palette) -> u32 {
         match self.status.state.as_str() {
             "critical" => pal.error,
             "warning" => pal.warning,
@@ -1198,52 +1170,47 @@ impl NirusecApp {
         }
     }
 
-    fn header(&mut self, ui: &mut Ui, ctx: &Context, pal: &Palette) {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new("NIRUSEC")
-                    .strong()
-                    .size(20.0)
-                    .color(pal.foreground),
-            );
-            ui.label(
-                RichText::new(&self.status.hostname)
-                    .color(pal.muted)
-                    .size(12.0),
-            );
+    fn refresh_all(&mut self) {
+        self.refresh_status();
+        if self.auto_status {
+            self.check_firewall();
+        }
+    }
+
+    fn header(&mut self, ui: &mut Ui, pal: &Palette) {
+        let color = self.status_color(pal);
+        let (x, y, w) = (ui.left(), ui.cursor_y(), ui.width());
+        let logo = crate::gui::logo::title(ui, "NIRUSEC", 3);
+        let bh = ui.line_h(Sz::Body) + 10;
+        ui.set_area(Rect::new(
+            x + logo.w + 14,
+            y + ((logo.h - bh) / 2).max(0),
+            (w - logo.w - 14).max(60),
+            0,
+        ));
+        ui.flow(|ui| {
+            ui.label(&self.status.hostname, Sz::Body, pal.muted);
             let state = if self.status.state.is_empty() {
                 "unknown"
             } else {
                 &self.status.state
             };
-            ui.label(
-                RichText::new(state.to_uppercase())
-                    .color(self.status_color(pal))
-                    .size(11.0),
-            );
-            ui.label(
-                RichText::new(self.age_text())
-                    .color(pal.disabled)
-                    .size(11.0),
-            );
+            ui.label(&state.to_uppercase(), Sz::Small, color);
+            ui.label(&self.age_text(), Sz::Small, pal.disabled);
             if self.status.state == "critical" {
-                ui.label(RichText::new("Needs attention").color(pal.error).strong());
+                ui.strong("Needs attention", Sz::Body, pal.error);
             }
             let label = if self.status_busy {
                 "Checking…"
             } else {
                 "Refresh"
             };
-            if ui
-                .add_enabled(!self.status_busy, Button::new(label))
-                .clicked()
-            {
-                self.refresh_status(ctx);
-                if self.auto_status {
-                    self.check_firewall(ctx);
-                }
+            if ui.button_ex(label, Btn::default().enabled(!self.status_busy)) {
+                self.refresh_all();
             }
         });
+        let end = ui.cursor_y().max(y + logo.h + 6);
+        ui.set_area(Rect::new(x, end, w, 0));
     }
 
     fn remaining(&self) -> i64 {
@@ -1252,193 +1219,172 @@ impl NirusecApp {
 
     /// Global banner while a change waits for Keep/Undo, or after an
     /// interruption. Usable during any status refresh.
-    fn pending_banner(&mut self, ui: &mut Ui, ctx: &Context, pal: &Palette) {
+    fn pending_banner(&mut self, ui: &mut Ui, pal: &Palette) {
         if !self.profile.unresolved() {
             return;
         }
         let pending = self.profile.pending();
         let color = if pending { pal.warning } else { pal.error };
-        Frame::none()
-            .fill(pal.panel)
-            .stroke(Stroke::new(2.0_f32, color))
-            .rounding(6.0)
-            .inner_margin(10.0)
-            .show(ui, |ui| {
-                let remaining = self.remaining();
-                let title = if pending && remaining > 0 {
-                    format!("Keep the new firewall settings? Undo in {remaining} s")
-                } else if pending {
-                    "Restoring the previous firewall settings…".into()
-                } else {
-                    "A firewall change needs your decision".into()
-                };
-                ui.label(RichText::new(title).color(color).strong().size(15.0));
-                let detail = if pending {
-                    format!(
-                        "Trying: {}. Check that everything you need still works (for example open a new SSH session) before pressing Keep.",
-                        self.profile.change
-                    )
-                } else {
-                    self.profile.message.clone()
-                };
-                ui.label(RichText::new(detail).color(pal.foreground).size(12.0));
-                ui.horizontal_wrapped(|ui| {
-                    let busy = self.helper_busy;
-                    match (&self.token, pending && remaining > 0) {
-                        (Some(token), true) => {
-                            let token = token.clone();
-                            if ui.add_enabled(!busy, Button::new(RichText::new("Keep").strong()).fill(pal.accent)).clicked() {
-                                self.run_helper(ctx, "tx-confirm", vec![token.clone()]);
-                            }
-                            if ui.add_enabled(!busy, Button::new("Undo now")).clicked() {
-                                self.run_helper(ctx, "tx-undo", vec![token]);
-                            }
+        let remaining = self.remaining();
+        ui.frame(fr(pal.panel, color, 2, 10, 6), |ui| {
+            let title = if pending && remaining > 0 {
+                format!("Keep the new firewall settings? Undo in {remaining} s")
+            } else if pending {
+                "Restoring the previous firewall settings…".into()
+            } else {
+                "A firewall change needs your decision".into()
+            };
+            ui.strong(&title, Sz::Big, color);
+            let detail = if pending {
+                format!(
+                    "Trying: {}. Check that everything you need still works (for example open a new SSH session) before pressing Keep.",
+                    self.profile.change
+                )
+            } else {
+                self.profile.message.clone()
+            };
+            ui.label(&detail, Sz::Body, pal.foreground);
+            ui.flow(|ui| {
+                let busy = self.helper_busy;
+                match (self.token.clone(), pending && remaining > 0) {
+                    (Some(token), true) => {
+                        if ui.button_ex("Keep", Btn::default().enabled(!busy).fill(pal.accent).strong()) {
+                            self.run_helper("tx-confirm", vec![token.clone()]);
                         }
-                        (None, true) => {
-                            ui.label(RichText::new("This change was started by another NIRUSEC window or before a restart; it will be undone automatically.").color(pal.muted).size(11.0));
-                            if ui.add_enabled(!busy, Button::new("Undo now…")).clicked() {
-                                self.confirm = Some(Confirm {
-                                    kind: ConfirmKind::Resolve("restore"),
-                                    title: "Undo the pending change now?".into(),
-                                    body: "The firewall settings from before the change are restored right away.".into(),
-                                    action: "tx-resolve",
-                                    commands: Vec::new(),
-                                    warnings: Vec::new(),
-                                    danger: false,
-                                });
-                            }
-                        }
-                        _ => {
-                            if ui.add_enabled(!busy, Button::new("Restore previous settings…").fill(pal.accent)).clicked() {
-                                self.confirm = Some(Confirm {
-                                    kind: ConfirmKind::Resolve("restore"),
-                                    title: "Restore the previous firewall settings?".into(),
-                                    body: "The backup taken just before the unconfirmed change is restored.".into(),
-                                    action: "tx-resolve",
-                                    commands: Vec::new(),
-                                    warnings: Vec::new(),
-                                    danger: false,
-                                });
-                            }
-                            if ui.add_enabled(!busy, Button::new("Keep the change…")).clicked() {
-                                self.confirm = Some(Confirm {
-                                    kind: ConfirmKind::Resolve("keep"),
-                                    title: "Keep the unconfirmed change?".into(),
-                                    body: format!("Keeps: {}.", self.profile.change),
-                                    action: "tx-resolve",
-                                    commands: Vec::new(),
-                                    warnings: Vec::new(),
-                                    danger: false,
-                                });
-                            }
+                        if ui.button_ex("Undo now", Btn::default().enabled(!busy)) {
+                            self.run_helper("tx-undo", vec![token]);
                         }
                     }
-                });
+                    (None, true) => {
+                        ui.label("This change was started by another NIRUSEC window or before a restart; it will be undone automatically.", Sz::Small, pal.muted);
+                        if ui.button_ex("Undo now…", Btn::default().enabled(!busy)) {
+                            self.confirm = Some(Confirm {
+                                kind: ConfirmKind::Resolve("restore"),
+                                title: "Undo the pending change now?".into(),
+                                body: "The firewall settings from before the change are restored right away.".into(),
+                                action: "tx-resolve",
+                                commands: Vec::new(),
+                                warnings: Vec::new(),
+                                danger: false,
+                            });
+                        }
+                    }
+                    _ => {
+                        if ui.button_ex("Restore previous settings…", Btn::default().enabled(!busy).fill(pal.accent)) {
+                            self.confirm = Some(Confirm {
+                                kind: ConfirmKind::Resolve("restore"),
+                                title: "Restore the previous firewall settings?".into(),
+                                body: "The backup taken just before the unconfirmed change is restored.".into(),
+                                action: "tx-resolve",
+                                commands: Vec::new(),
+                                warnings: Vec::new(),
+                                danger: false,
+                            });
+                        }
+                        if ui.button_ex("Keep the change…", Btn::default().enabled(!busy)) {
+                            self.confirm = Some(Confirm {
+                                kind: ConfirmKind::Resolve("keep"),
+                                title: "Keep the unconfirmed change?".into(),
+                                body: format!("Keeps: {}.", self.profile.change),
+                                action: "tx-resolve",
+                                commands: Vec::new(),
+                                warnings: Vec::new(),
+                                danger: false,
+                            });
+                        }
+                    }
+                }
             });
-        ui.add_space(6.0);
+        });
+        ui.space(6);
     }
 
     fn nav(&mut self, ui: &mut Ui, pal: &Palette, wide: bool) {
-        let views = [
-            View::Overview,
-            View::Firewall,
-            View::Ports,
-            View::Logs,
-            View::Updates,
-            View::Firmware,
-            View::Docker,
-        ];
         if wide {
-            ui.vertical(|ui| {
-                ui.set_width(155.0);
-                ui.add_space(8.0);
-                for view in views {
-                    let selected = self.view == view;
-                    let text = RichText::new(view.title()).color(if selected {
-                        pal.background
-                    } else {
-                        pal.foreground
-                    });
-                    let button =
-                        Button::new(text).fill(if selected { pal.accent } else { pal.surface });
-                    if ui.add_sized([145.0, 30.0], button).clicked() {
-                        self.view = view;
-                    }
+            ui.space(8);
+            for view in VIEWS {
+                let selected = self.view == view;
+                let b = Btn::default().selected(selected).width(145);
+                if ui.button_ex(view.title(), b) {
+                    self.set_view(ui, view);
                 }
-            });
-            ui.separator();
-        } else {
-            ui.horizontal_wrapped(|ui| {
-                for view in views {
-                    let selected = self.view == view;
-                    if ui
-                        .add(Button::new(view.title()).selected(selected))
-                        .clicked()
-                    {
-                        self.view = view;
-                    }
-                }
-            });
-            ui.separator();
-        }
-    }
-
-    fn content(&mut self, ui: &mut Ui, ctx: &Context, pal: &Palette) {
-        if let Some((message, error)) = self.message.clone() {
-            ui.horizontal_wrapped(|ui| {
-                let color = if error { pal.error } else { pal.success };
-                ui.label(RichText::new(&message).color(color));
-                if ui.small_button("✕").on_hover_text("Dismiss").clicked() {
-                    self.message = None;
-                    self.output = None;
-                }
-            });
-            if let Some(output) = &self.output {
-                egui::CollapsingHeader::new("Command output")
-                    .id_salt("nirusec-output")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        let mut text = output.clone();
-                        ui.add(
-                            TextEdit::multiline(&mut text)
-                                .font(egui::TextStyle::Monospace)
-                                .desired_rows(4)
-                                .desired_width(f32::INFINITY),
-                        );
-                    });
             }
-            ui.add_space(4.0);
-        }
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| match self.view {
-                View::Overview => self.overview(ui, ctx, pal),
-                View::Firewall => self.firewall(ui, ctx, pal),
-                View::Ports => self.ports(ui, pal),
-                View::Logs => self.logs(ui, pal),
-                View::Updates => self.updates(ui, ctx, pal),
-                View::Firmware => self.firmware(ui, ctx, pal),
-                View::Docker => self.docker(ui, pal),
+        } else {
+            ui.flow(|ui| {
+                for view in VIEWS {
+                    let selected = self.view == view;
+                    if ui.button_ex(view.title(), Btn::default().selected(selected)) {
+                        self.set_view(ui, view);
+                    }
+                }
             });
+            ui.separator();
+        }
+        let _ = pal;
     }
 
-    fn overview(&mut self, ui: &mut Ui, ctx: &Context, pal: &Palette) {
+    fn content(&mut self, ui: &mut Ui, pal: &Palette, bottom: i32) {
+        if let Some((message, error)) = self.message.clone() {
+            let color = if error { pal.error } else { pal.success };
+            let mut dismiss = false;
+            ui.flow(|ui| {
+                ui.label(&message, Sz::Body, color);
+                if ui.button_ex("✕", Btn::default().small()) {
+                    dismiss = true;
+                }
+                ui.tooltip("Dismiss");
+            });
+            if dismiss {
+                self.message = None;
+                self.output = None;
+            }
+            if let Some(output) = self.output.clone() {
+                if ui.collapsing("nirusec-output", "Command output", false) {
+                    let mut copy = false;
+                    ui.frame(fr(pal.panel, pal.border, 1, 6, 4), |ui| {
+                        ui.scroll_max("nirusec-output-text", 220, |ui| {
+                            ui.label(output.trim_end(), Sz::Small, pal.foreground);
+                        });
+                        copy = ui.button_ex("Copy output", Btn::default().small());
+                    });
+                    if copy {
+                        ui.st.copy = Some(output.clone());
+                        self.message = Some(("Command output copied".into(), false));
+                    }
+                }
+            }
+            ui.space(4);
+        }
+        let top = ui.cursor_y();
+        let view = Rect::new(ui.left(), top, ui.width(), (bottom - top).max(40));
+        ui.scroll(SCROLL, view, |ui| match self.view {
+            View::Overview => self.overview(ui, pal),
+            View::Firewall => self.firewall(ui, pal),
+            View::Ports => self.ports(ui, pal),
+            View::Logs => self.logs(ui, pal),
+            View::Updates => self.updates(ui, pal),
+            View::Firmware => self.firmware(ui, pal),
+            View::Docker => self.docker(ui, pal),
+        });
+    }
+
+    fn overview(&mut self, ui: &mut Ui, pal: &Palette) {
         ui.heading("Overview");
-        ui.label(RichText::new(&self.status.summary).color(self.status_color(pal)));
-        ui.add_space(10.0);
+        ui.label(&self.status.summary, Sz::Body, self.status_color(pal));
+        ui.space(10);
         let headline = explain::headline(&self.status.firewall, &self.profile);
         let cards = [
             (
                 "Firewall",
                 headline.title.clone(),
                 explain::profile_line(&self.profile),
-                Some(View::Firewall),
+                View::Firewall,
             ),
             (
                 "Updates",
                 self.status.updates.count.to_string(),
                 self.status.updates.manager.clone(),
-                Some(View::Updates),
+                View::Updates,
             ),
             (
                 "Firmware",
@@ -1452,7 +1398,7 @@ impl NirusecApp {
                 } else {
                     "Microcode present".into()
                 },
-                Some(View::Firmware),
+                View::Firmware,
             ),
             (
                 "Docker",
@@ -1462,270 +1408,239 @@ impl NirusecApp {
                     "Unavailable".into()
                 },
                 "Running containers".into(),
-                Some(View::Docker),
+                View::Docker,
             ),
         ];
-        let width = ui.available_width();
-        let columns = if width > 900.0 {
+        let width = ui.width();
+        let columns = if width > 900 {
             3
-        } else if width > 600.0 {
+        } else if width > 600 {
             2
         } else {
             1
         };
-        let card_width = ((width - (columns as f32 - 1.0) * 8.0) / columns as f32).max(160.0);
-        for (row, chunk) in cards.chunks(columns).enumerate() {
-            if row > 0 {
-                ui.add_space(6.0);
-            }
-            ui.horizontal(|ui| {
-                for (title, value, detail, target) in chunk {
-                    let response = ui
-                        .scope(|ui| {
-                            self.card_width(ui, pal, card_width, title, value.clone(), detail)
-                        })
-                        .response
-                        .interact(egui::Sense::click())
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if response.clicked() {
-                        if let Some(view) = target {
-                            self.view = *view;
-                        }
+        let mut go = None;
+        for chunk in cards.chunks(columns) {
+            ui.columns(columns, 8, |ui, i| {
+                if let Some((title, value, detail, target)) = chunk.get(i) {
+                    let r = Self::card(ui, pal, title, value, detail);
+                    if ui.click_area(title, r) {
+                        go = Some(*target);
                     }
-                    ui.add_space(4.0);
                 }
             });
         }
-        ui.add_space(10.0);
-        Frame::none()
-            .fill(pal.surface)
-            .stroke(Stroke::new(1.0_f32, pal.border))
-            .rounding(6.0)
-            .inner_margin(10.0)
-            .show(ui, |ui| {
-                ui.label(RichText::new("What needs attention").strong());
-                if self.status.errors.is_empty() && self.status.state != "critical" {
-                    ui.label(
-                        RichText::new("No blocking problems found by the last check.")
-                            .color(pal.success),
-                    );
-                } else {
-                    if !self.status.summary.is_empty() {
-                        ui.label(RichText::new(&self.status.summary).color(self.status_color(pal)));
-                    }
-                    for error in &self.status.errors {
-                        ui.label(RichText::new(format!("• {error}")).color(pal.warning));
-                    }
+        if let Some(view) = go {
+            self.set_view(ui, view);
+        }
+        ui.space(10);
+        let color = self.status_color(pal);
+        ui.frame(fr(pal.surface, pal.border, 1, 10, 6), |ui| {
+            ui.strong("What needs attention", Sz::Body, pal.foreground);
+            if self.status.errors.is_empty() && self.status.state != "critical" {
+                ui.label(
+                    "No blocking problems found by the last check.",
+                    Sz::Body,
+                    pal.success,
+                );
+            } else {
+                if !self.status.summary.is_empty() {
+                    ui.label(&self.status.summary, Sz::Body, color);
                 }
-            });
-        let _ = ctx;
+                for error in &self.status.errors {
+                    ui.label(&format!("• {error}"), Sz::Body, pal.warning);
+                }
+            }
+        });
     }
 
-    fn section(ui: &mut Ui, pal: &Palette, add: impl FnOnce(&mut Ui)) {
-        Frame::none()
-            .fill(pal.surface)
-            .stroke(Stroke::new(1.0_f32, pal.border))
-            .rounding(6.0)
-            .inner_margin(10.0)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                add(ui)
-            });
-        ui.add_space(8.0);
+    fn section<R>(ui: &mut Ui, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> R {
+        let r = ui.frame(fr(pal.surface, pal.border, 1, 10, 6), add).0;
+        ui.space(2);
+        r
     }
 
-    fn firewall(&mut self, ui: &mut Ui, ctx: &Context, pal: &Palette) {
+    fn firewall(&mut self, ui: &mut Ui, pal: &Palette) {
         if !self.first_status_requested && self.auto_status {
             self.first_status_requested = true;
-            self.check_firewall(ctx);
+            self.check_firewall();
         }
         ui.heading("Firewall");
         // 1. Plain-language status
         let headline = explain::headline(&self.status.firewall, &self.profile);
         let color = level_color(headline.level, pal);
-        Frame::none()
-            .fill(pal.panel)
-            .stroke(Stroke::new(1.5_f32, color))
-            .rounding(6.0)
-            .inner_margin(12.0)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new(&headline.title).color(color).strong().size(20.0));
-                ui.label(RichText::new(explain::profile_line(&self.profile)).color(pal.muted).size(12.0));
-                ui.add_space(4.0);
-                ui.label(RichText::new(&headline.detail).color(pal.foreground));
-                for line in &headline.allowed {
-                    ui.label(RichText::new(format!("  ✔ {line}")).color(pal.foreground));
-                }
-                for line in &headline.blocked {
-                    ui.label(RichText::new(format!("  ✖ {line}")).color(pal.foreground));
-                }
-                if headline.level == Level::Good {
-                    ui.label(RichText::new(format!(
+        let mut action = None;
+        ui.frame(fr(pal.panel, color, 2, 12, 6), |ui| {
+            ui.strong(&headline.title, Sz::Title, color);
+            ui.label(&explain::profile_line(&self.profile), Sz::Body, pal.muted);
+            ui.space(4);
+            ui.label(&headline.detail, Sz::Body, pal.foreground);
+            for line in &headline.allowed {
+                ui.label(&format!("  ✔ {line}"), Sz::Body, pal.foreground);
+            }
+            for line in &headline.blocked {
+                ui.label(&format!("  ✖ {line}"), Sz::Body, pal.foreground);
+            }
+            if headline.level == Level::Good {
+                ui.label(
+                    &format!(
                         "Outgoing connections: {}.",
                         explain::incoming_policy_text(self.status.firewall.outgoing.as_deref())
-                    )).color(pal.muted).size(11.0));
-                }
-                if let Some(false) = self.profile.verified {
-                    ui.label(RichText::new(format!(
+                    ),
+                    Sz::Small,
+                    pal.muted,
+                );
+            }
+            if let Some(false) = self.profile.verified {
+                ui.label(
+                    &format!(
                         "Changed outside NIRUSEC since its last change: {}",
                         self.profile.drift.join(", ")
-                    )).color(pal.warning).size(11.0));
+                    ),
+                    Sz::Small,
+                    pal.warning,
+                );
+            }
+            if self.status.firewall.enabled == Some(true)
+                && self.status.firewall.boot_enabled == Some(false)
+            {
+                ui.label("Warning: the UFW boot service is disabled, so the firewall will be off after a restart. Turning the firewall on in NIRUSEC enables it.", Sz::Small, pal.warning);
+            }
+            // Remote access summary
+            let a = &self.status.access;
+            let mut access_line = if a.ssh_listening {
+                format!("SSH server: listening on {}", a.ssh_scope)
+            } else {
+                "SSH server: not listening".into()
+            };
+            if let Some((rules, allows, _)) = self.current_evals() {
+                if a.ssh_listening {
+                    let from = Self::ssh_origins(&rules, allows);
+                    access_line.push_str(&if from.is_empty() {
+                        " · not reachable through the firewall".to_string()
+                    } else {
+                        format!(
+                            " · likely reachable from {}",
+                            from.iter().map(|o| o.label()).collect::<Vec<_>>().join(", ")
+                        )
+                    });
                 }
-                if self.status.firewall.enabled == Some(true) && self.status.firewall.boot_enabled == Some(false) {
-                    ui.label(RichText::new("Warning: the UFW boot service is disabled, so the firewall will be off after a restart. Turning the firewall on in NIRUSEC enables it.").color(pal.warning).size(11.0));
-                }
-                // Remote access summary
-                let a = &self.status.access;
-                let mut access_line = if a.ssh_listening {
-                    format!("SSH server: listening on {}", a.ssh_scope)
-                } else {
-                    "SSH server: not listening".into()
-                };
-                if let Some((rules, allows, _)) = self.current_evals() {
-                    if a.ssh_listening {
-                        let from = Self::ssh_origins(&rules, allows);
-                        access_line.push_str(&if from.is_empty() {
-                            " · not reachable through the firewall".to_string()
-                        } else {
-                            format!(" · likely reachable from {}", from.iter().map(|o| o.label()).collect::<Vec<_>>().join(", "))
-                        });
-                    }
-                }
-                if a.ssh_sessions() > 0 {
-                    access_line.push_str(&format!(
-                        " · {} SSH session(s) now ({} Tailscale, {} local, {} internet)",
-                        a.ssh_sessions(),
-                        a.ssh_sessions_tailscale,
-                        a.ssh_sessions_lan,
-                        a.ssh_sessions_public
-                    ));
-                }
-                access_line.push_str(if a.tailscale_up { " · Tailscale: up" } else { " · Tailscale: not connected" });
-                ui.label(RichText::new(access_line).color(pal.muted).size(11.0));
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    let busy = self.helper_busy || self.profile.unresolved();
-                    let check_label = if self.helper_busy { "Checking…" } else if self.auto_status { "Check now" } else { "Check now (password)" };
-                    if ui.add_enabled(!self.helper_busy, Button::new(check_label)).clicked() {
-                        self.check_firewall(ctx);
-                    }
-                    let off = self.status.firewall.running == Some(false)
-                        || self.status.firewall.running.is_none() && self.status.firewall.enabled == Some(false);
-                    if self.status.firewall.installed {
-                        if off {
-                            if ui.add_enabled(!busy, Button::new("Turn firewall on…").fill(pal.accent)).clicked() {
-                                let rules: Vec<Eval> = self.status.firewall.rules.iter().filter_map(Eval::from_rule).collect();
-                                let allows = explain::incoming_policy_text(self.status.firewall.incoming.as_deref()) == "allowed";
-                                let mut warnings = if self.rules_loaded { self.access_warnings(&rules, allows) } else { Vec::new() };
-                                if !self.rules_loaded {
-                                    warnings.push("The current rules have not been read; check them first or choose a profile instead.".into());
-                                }
-                                self.confirm = Some(Confirm {
-                                    kind: ConfirmKind::EnableFirewall,
-                                    title: "Turn the firewall on?".into(),
-                                    body: format!(
-                                        "UFW starts with its current rules and default policies (incoming: {}). Turning it on can block remote access, so it is undone automatically after {} seconds unless you press Keep. Choosing a profile is usually simpler.",
-                                        explain::incoming_policy_text(self.status.firewall.incoming.as_deref()),
-                                        tx::window_seconds()
-                                    ),
-                                    action: "ufw-enable",
-                                    commands: vec!["ufw --force enable".into()],
-                                    warnings,
-                                    danger: false,
-                                });
-                            }
-                        } else if ui.add_enabled(!busy, Button::new("Turn firewall off…")).clicked() {
-                            self.confirm_profile(Profile::Off);
-                        }
-                    }
-                    if self.fw_checked_at > 0 {
-                        ui.label(RichText::new(format!("rules checked {}", fmt_time(self.fw_checked_at))).color(pal.disabled).size(10.0));
-                    } else if !self.auto_status {
-                        ui.label(RichText::new("Reading the rules needs your password with this PolicyKit policy.").color(pal.disabled).size(10.0));
-                    }
-                });
+            }
+            if a.ssh_sessions() > 0 {
+                access_line.push_str(&format!(
+                    " · {} SSH session(s) now ({} Tailscale, {} local, {} internet)",
+                    a.ssh_sessions(),
+                    a.ssh_sessions_tailscale,
+                    a.ssh_sessions_lan,
+                    a.ssh_sessions_public
+                ));
+            }
+            access_line.push_str(if a.tailscale_up {
+                " · Tailscale: up"
+            } else {
+                " · Tailscale: not connected"
             });
-        ui.add_space(10.0);
+            ui.label(&access_line, Sz::Small, pal.muted);
+            ui.space(4);
+            ui.flow(|ui| {
+                let busy = self.helper_busy || self.profile.unresolved();
+                let check_label = if self.helper_busy {
+                    "Checking…"
+                } else if self.auto_status {
+                    "Check now"
+                } else {
+                    "Check now (password)"
+                };
+                if ui.button_ex(check_label, Btn::default().enabled(!self.helper_busy)) {
+                    action = Some(0);
+                }
+                let fw = &self.status.firewall;
+                let off = fw.running == Some(false) || fw.running.is_none() && fw.enabled == Some(false);
+                if fw.installed {
+                    if off {
+                        if ui.button_ex(
+                            "Turn firewall on…",
+                            Btn::default().enabled(!busy).fill(pal.accent),
+                        ) {
+                            action = Some(1);
+                        }
+                    } else if ui.button_ex("Turn firewall off…", Btn::default().enabled(!busy)) {
+                        action = Some(2);
+                    }
+                }
+                if self.fw_checked_at > 0 {
+                    ui.label(
+                        &format!("rules checked {}", fmt_time(self.fw_checked_at)),
+                        Sz::Tiny,
+                        pal.disabled,
+                    );
+                } else if !self.auto_status {
+                    ui.label(
+                        "Reading the rules needs your password with this PolicyKit policy.",
+                        Sz::Tiny,
+                        pal.disabled,
+                    );
+                }
+            });
+        });
+        match action {
+            Some(0) => self.check_firewall(),
+            Some(1) => self.confirm_enable(),
+            Some(2) => self.confirm_profile(Profile::Off),
+            _ => {}
+        }
+        ui.space(10);
 
         // 2. Profiles
         Self::section(ui, pal, |ui| {
-            ui.label(RichText::new("Profiles").strong().size(15.0));
-            ui.label(RichText::new("A profile replaces all firewall rules with a tested set. Your Tailscale devices can always reach this computer, except with Off.").color(pal.muted).size(11.0));
+            ui.strong("Profiles", Sz::Big, pal.foreground);
+            ui.label("A profile replaces all firewall rules with a tested set. Your Tailscale devices can always reach this computer, except with Off.", Sz::Small, pal.muted);
         });
         let blocked = self.helper_busy || self.profile.unresolved();
-        let wide = ui.available_width() > 640.0;
+        let cols = if ui.width() > 640 { 2 } else { 1 };
         let mut chosen = None;
-        let cols = if wide { 2 } else { 1 };
-        let width = ((ui.available_width() - 8.0 * (cols as f32 - 1.0)) / cols as f32).max(200.0);
         for chunk in profiles::ALL.chunks(cols) {
-            ui.horizontal(|ui| {
-                for profile in chunk {
-                    let active = self.profile.id == profile.id() && self.profile.state == "kept";
-                    let trying = self.profile.pending() && self.profile.id == profile.id();
-                    let border = if active {
-                        pal.success
-                    } else if trying {
-                        pal.warning
-                    } else {
-                        pal.border
-                    };
-                    Frame::none()
-                        .fill(if active { pal.panel } else { pal.surface })
-                        .stroke(Stroke::new(if active { 2.0_f32 } else { 1.0_f32 }, border))
-                        .rounding(6.0)
-                        .inner_margin(8.0)
-                        .show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                ui.set_width(width - 18.0);
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(
-                                        RichText::new(profile.label()).strong().size(14.0).color(
-                                            if *profile == Profile::Off {
-                                                pal.error
-                                            } else {
-                                                pal.foreground
-                                            },
-                                        ),
-                                    );
-                                    ui.label(RichText::new(profile.purpose()).color(pal.muted));
-                                    if active {
-                                        ui.label(
-                                            RichText::new("ACTIVE")
-                                                .color(pal.success)
-                                                .strong()
-                                                .size(10.0),
-                                        );
-                                    } else if trying {
-                                        ui.label(
-                                            RichText::new("TRYING")
-                                                .color(pal.warning)
-                                                .strong()
-                                                .size(10.0),
-                                        );
-                                    }
-                                });
-                                ui.label(
-                                    RichText::new(profile.description())
-                                        .color(pal.foreground)
-                                        .size(11.0),
-                                );
-                                if !active
-                                    && ui
-                                        .add_enabled(
-                                            !blocked,
-                                            Button::new(format!("Preview {}…", profile.label())),
-                                        )
-                                        .clicked()
-                                {
-                                    chosen = Some(*profile);
-                                }
-                            })
-                        });
-                    ui.add_space(4.0);
-                }
+            ui.columns(cols, 8, |ui, i| {
+                let Some(profile) = chunk.get(i) else {
+                    return;
+                };
+                let active = self.profile.id == profile.id() && self.profile.state == "kept";
+                let trying = self.profile.pending() && self.profile.id == profile.id();
+                let border = if active {
+                    pal.success
+                } else if trying {
+                    pal.warning
+                } else {
+                    pal.border
+                };
+                let fill = if active { pal.panel } else { pal.surface };
+                ui.frame(fr(fill, border, if active { 2 } else { 1 }, 8, 6), |ui| {
+                    ui.flow(|ui| {
+                        let c = if *profile == Profile::Off {
+                            pal.error
+                        } else {
+                            pal.foreground
+                        };
+                        ui.strong(profile.label(), Sz::Big, c);
+                        ui.label(profile.purpose(), Sz::Body, pal.muted);
+                        if active {
+                            ui.strong("ACTIVE", Sz::Tiny, pal.success);
+                        } else if trying {
+                            ui.strong("TRYING", Sz::Tiny, pal.warning);
+                        }
+                    });
+                    ui.label(profile.description(), Sz::Small, pal.foreground);
+                    if !active
+                        && ui.button_ex(
+                            &format!("Preview {}…", profile.label()),
+                            Btn::default().enabled(!blocked),
+                        )
+                    {
+                        chosen = Some(*profile);
+                    }
+                });
             });
-            ui.add_space(4.0);
+            ui.space(2);
         }
         if let Some(profile) = chosen.or_else(|| {
             self.rules_loaded
@@ -1733,157 +1648,180 @@ impl NirusecApp {
                 .flatten()
         }) {
             self.confirm_profile(profile);
+            ui.st.again = true;
         }
-        ui.add_space(6.0);
+        ui.space(6);
 
         // 3. Rule editor
         self.rule_editor(ui, pal, blocked);
         // 4. Current rules
-        self.rule_list(ui, ctx, pal, blocked);
+        self.rule_list(ui, pal, blocked);
         // 5. History and recovery
         self.history(ui, pal, blocked);
+    }
+
+    fn confirm_enable(&mut self) {
+        let rules: Vec<Eval> = self
+            .status
+            .firewall
+            .rules
+            .iter()
+            .filter_map(Eval::from_rule)
+            .collect();
+        let allows =
+            explain::incoming_policy_text(self.status.firewall.incoming.as_deref()) == "allowed";
+        let mut warnings = if self.rules_loaded {
+            self.access_warnings(&rules, allows)
+        } else {
+            Vec::new()
+        };
+        if !self.rules_loaded {
+            warnings.push("The current rules have not been read; check them first or choose a profile instead.".into());
+        }
+        self.confirm = Some(Confirm {
+            kind: ConfirmKind::EnableFirewall,
+            title: "Turn the firewall on?".into(),
+            body: format!(
+                "UFW starts with its current rules and default policies (incoming: {}). Turning it on can block remote access, so it is undone automatically after {} seconds unless you press Keep. Choosing a profile is usually simpler.",
+                explain::incoming_policy_text(self.status.firewall.incoming.as_deref()),
+                tx::window_seconds()
+            ),
+            action: "ufw-enable",
+            commands: vec!["ufw --force enable".into()],
+            warnings,
+            danger: false,
+        });
     }
 
     fn rule_editor(&mut self, ui: &mut Ui, pal: &Palette, blocked: bool) {
         let ipv6 = tx::ipv6_enabled();
         let mut submit = None;
+        let form = &mut self.form;
         Self::section(ui, pal, |ui| {
-            ui.label(
-                RichText::new("Allow or block something")
-                    .strong()
-                    .size(15.0),
-            );
-            Grid::new("nirusec-rule-form")
-                .num_columns(2)
-                .spacing([12.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("What");
-                    egui::ComboBox::from_id_salt("nirusec-preset")
-                        .selected_text(self.form.preset.label())
-                        .show_ui(ui, |ui| {
-                            for preset in Preset::ALL {
-                                ui.selectable_value(&mut self.form.preset, preset, preset.label());
-                            }
-                        });
-                    ui.end_row();
-                    if self.form.preset == Preset::Custom {
-                        ui.label("Port");
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                TextEdit::singleline(&mut self.form.port)
-                                    .desired_width(110.0)
-                                    .hint_text("8080 or 6000:6010"),
-                            );
-                            egui::ComboBox::from_id_salt("nirusec-proto")
-                                .selected_text(match self.form.protocol.as_str() {
-                                    "udp" => "UDP",
-                                    "any" => "TCP + UDP",
-                                    _ => "TCP",
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.form.protocol,
-                                        "tcp".into(),
-                                        "TCP",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.form.protocol,
-                                        "udp".into(),
-                                        "UDP",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.form.protocol,
-                                        "any".into(),
-                                        "TCP + UDP",
-                                    );
-                                });
-                        });
-                        ui.end_row();
-                    }
-                    ui.label("From");
-                    egui::ComboBox::from_id_salt("nirusec-origin")
-                        .selected_text(self.form.origin.label())
-                        .show_ui(ui, |ui| {
-                            for origin in [
-                                Origin2::Tailscale,
-                                Origin2::Lan,
-                                Origin2::Anywhere,
-                                Origin2::Address,
-                            ] {
-                                ui.selectable_value(&mut self.form.origin, origin, origin.label());
-                            }
-                        });
-                    ui.end_row();
-                    if self.form.origin == Origin2::Address {
-                        ui.label("Address");
-                        ui.add(
-                            TextEdit::singleline(&mut self.form.address)
-                                .desired_width(240.0)
-                                .hint_text("192.168.1.20 or 192.168.1.0/24"),
-                        );
-                        ui.end_row();
-                    }
-                    ui.label("Action");
-                    ui.horizontal_wrapped(|ui| {
-                        ui.radio_value(&mut self.form.action, FormAction::Allow, "Allow");
-                        if self.form.preset == Preset::Ssh {
-                            ui.radio_value(
-                                &mut self.form.action,
-                                FormAction::Limit,
-                                "Allow, slow down repeated logins",
-                            );
-                        } else if self.form.action == FormAction::Limit {
-                            self.form.action = FormAction::Allow;
+            ui.strong("Allow or block something", Sz::Big, pal.foreground);
+            let narrow = ui.width() < 420;
+            let label_w = if narrow { 0 } else { 70 };
+            // One row of the form: a label column and the control.
+            fn row(ui: &mut Ui, pal: &Palette, label_w: i32, label: &str, f: impl FnOnce(&mut Ui)) {
+                if label_w == 0 {
+                    ui.label(label, Sz::Body, pal.muted);
+                    f(ui);
+                    return;
+                }
+                let y = ui.cursor_y();
+                let (x, w) = (ui.left(), ui.width());
+                ui.set_area(Rect::new(x, y + 5, label_w, 20));
+                ui.label(label, Sz::Body, pal.foreground);
+                ui.set_area(Rect::new(x + label_w + 12, y, w - label_w - 12, 0));
+                f(ui);
+                let end = ui.cursor_y();
+                ui.set_area(Rect::new(x, end, w, 0));
+            }
+            let presets: Vec<&str> = Preset::ALL.iter().map(|p| p.label()).collect();
+            row(ui, pal, label_w, "What", |ui| {
+                let cur = Preset::ALL
+                    .iter()
+                    .position(|p| *p == form.preset)
+                    .unwrap_or(0);
+                if let Some(i) = ui.combo("nirusec-preset", &presets, cur, 280) {
+                    form.preset = Preset::ALL[i];
+                }
+            });
+            if form.preset == Preset::Custom {
+                row(ui, pal, label_w, "Port", |ui| {
+                    ui.flow(|ui| {
+                        ui.text_edit("nirusec-port", &mut form.port, "8080 or 6000:6010", 170);
+                        let protos = ["tcp", "udp", "any"];
+                        let names = ["TCP", "UDP", "TCP + UDP"];
+                        let cur = protos.iter().position(|p| *p == form.protocol).unwrap_or(0);
+                        if let Some(i) = ui.combo("nirusec-proto", &names, cur, 130) {
+                            form.protocol = protos[i].into();
                         }
-                        ui.radio_value(&mut self.form.action, FormAction::Block, "Block");
                     });
-                    ui.end_row();
-                    ui.label("Note");
-                    ui.add(
-                        TextEdit::singleline(&mut self.form.comment)
-                            .desired_width(240.0)
-                            .hint_text("optional, e.g. printer"),
-                    );
-                    ui.end_row();
                 });
-            ui.checkbox(
-                &mut self.form.keep,
-                "Keep it on every profile (local exception)",
-            );
-            match self.form.requests(ipv6) {
+            }
+            let origins = [
+                Origin2::Tailscale,
+                Origin2::Lan,
+                Origin2::Anywhere,
+                Origin2::Address,
+            ];
+            let names: Vec<&str> = origins.iter().map(|o| o.label()).collect();
+            row(ui, pal, label_w, "From", |ui| {
+                let cur = origins.iter().position(|o| *o == form.origin).unwrap_or(0);
+                if let Some(i) = ui.combo("nirusec-origin", &names, cur, 280) {
+                    form.origin = origins[i];
+                }
+            });
+            if form.origin == Origin2::Address {
+                row(ui, pal, label_w, "Address", |ui| {
+                    ui.text_edit(
+                        "nirusec-address",
+                        &mut form.address,
+                        "192.168.1.20 or 192.168.1.0/24",
+                        300,
+                    );
+                });
+            }
+            row(ui, pal, label_w, "Action", |ui| {
+                ui.flow(|ui| {
+                    if ui.radio(form.action == FormAction::Allow, "Allow") {
+                        form.action = FormAction::Allow;
+                    }
+                    if form.preset == Preset::Ssh {
+                        if ui.radio(
+                            form.action == FormAction::Limit,
+                            "Allow, slow down repeated logins",
+                        ) {
+                            form.action = FormAction::Limit;
+                        }
+                    } else if form.action == FormAction::Limit {
+                        form.action = FormAction::Allow;
+                    }
+                    if ui.radio(form.action == FormAction::Block, "Block") {
+                        form.action = FormAction::Block;
+                    }
+                });
+            });
+            row(ui, pal, label_w, "Note", |ui| {
+                ui.text_edit(
+                    "nirusec-note",
+                    &mut form.comment,
+                    "optional, e.g. printer",
+                    300,
+                );
+            });
+            ui.checkbox(&mut form.keep, "Keep it on every profile (local exception)");
+            match form.requests(ipv6) {
                 Ok(rules) => {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new("Preview").color(pal.muted).size(11.0));
+                    ui.space(4);
+                    ui.label("Preview", Sz::Small, pal.muted);
                     let mut seen = Vec::new();
                     for rule in &rules {
                         let text = ufw::describe_request(rule);
                         if !seen.contains(&text) {
-                            ui.label(RichText::new(format!("• {text}")).color(pal.foreground));
+                            ui.label(&format!("• {text}"), Sz::Body, pal.foreground);
                             seen.push(text);
                         }
                     }
                     for rule in &rules {
                         ui.label(
-                            RichText::new(ufw::render_command(&ufw::add_args(rule)))
-                                .monospace()
-                                .size(10.0)
-                                .color(pal.disabled),
+                            &ufw::render_command(&ufw::add_args(rule)),
+                            Sz::Tiny,
+                            pal.disabled,
                         );
                     }
-                    let label = if self.form.action == FormAction::Block {
+                    let label = if form.action == FormAction::Block {
                         "Block…"
                     } else {
                         "Allow…"
                     };
-                    if ui
-                        .add_enabled(!blocked, Button::new(label).fill(pal.accent))
-                        .clicked()
-                    {
-                        submit = Some((rules, self.form.keep));
+                    if ui.button_ex(label, Btn::default().enabled(!blocked).fill(pal.accent)) {
+                        submit = Some((rules, form.keep));
                     }
                 }
                 Err(error) => {
-                    ui.label(RichText::new(error).color(pal.warning).size(11.0));
+                    ui.label(&error, Sz::Small, pal.warning);
                 }
             }
         });
@@ -1892,97 +1830,104 @@ impl NirusecApp {
         }
     }
 
-    fn rule_list(&mut self, ui: &mut Ui, ctx: &Context, pal: &Palette, blocked: bool) {
+    fn rule_list(&mut self, ui: &mut Ui, pal: &Palette, blocked: bool) {
         let mut delete = None;
         let mut remove_exception = None;
         let rules = self.status.firewall.rules.clone();
         let exceptions = self.exceptions();
         let rules_loaded = self.rules_loaded;
         let auto = self.auto_status;
+        let exceptions_error = self.fw.as_ref().and_then(|fw| fw.exceptions_error.clone());
         let mut load = false;
         Self::section(ui, pal, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Current rules").strong().size(15.0));
+            ui.flow(|ui| {
+                ui.strong("Current rules", Sz::Big, pal.foreground);
                 ui.label(
-                    RichText::new("checked in order; the first match wins")
-                        .color(pal.disabled)
-                        .size(10.0),
+                    "checked in order; the first match wins",
+                    Sz::Tiny,
+                    pal.disabled,
                 );
             });
             if !rules_loaded {
                 ui.label(
-                    RichText::new(if auto {
+                    if auto {
                         "Loading…"
                     } else {
                         "UFW rules need root access to read."
-                    })
-                    .color(pal.disabled),
+                    },
+                    Sz::Body,
+                    pal.disabled,
                 );
-                if !auto && ui.button("Load rules (password)").clicked() {
+                if !auto && ui.button("Load rules (password)") {
                     load = true;
                 }
                 return;
             }
             if rules.is_empty() {
                 ui.label(
-                    RichText::new("No rules. Only the default policy applies.").color(pal.disabled),
+                    "No rules. Only the default policy applies.",
+                    Sz::Body,
+                    pal.disabled,
                 );
             }
+            let btn_w = ui.text_width("Stop keeping…", Sz::Small) + 16;
+            let num_w = ui.text_width("00", Sz::Body) + 8;
             for row in explain::rule_rows(&rules) {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("{:>2}", row.rule.number))
-                            .color(pal.disabled)
-                            .monospace(),
-                    );
-                    let mut text = ufw::describe_rule(row.rule);
-                    if !row.rule.comment.is_empty() {
-                        text.push_str(&format!(" — {}", row.rule.comment));
-                    }
-                    ui.label(RichText::new(text).color(pal.foreground))
-                        .on_hover_text(match row.twin {
-                            Some(twin) => format!("{}\n{}", row.rule.raw, twin.raw),
-                            None => row.rule.raw.clone(),
-                        });
-                    ui.label(RichText::new(row.family()).color(pal.disabled).size(10.0));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add_enabled(!blocked, Button::new("Remove…").small())
-                            .clicked()
-                        {
-                            delete = Some((row.rule.clone(), row.twin.cloned()));
-                        }
-                    });
-                });
+                let y = ui.cursor_y();
+                let (x, w) = (ui.left(), ui.width());
+                ui.set_area(Rect::new(x, y, num_w, 0));
+                ui.label(&format!("{:>2}", row.rule.number), Sz::Body, pal.disabled);
+                ui.set_area(Rect::new(x + num_w, y, (w - num_w - btn_w - 8).max(40), 0));
+                let mut text = ufw::describe_rule(row.rule);
+                if !row.rule.comment.is_empty() {
+                    text.push_str(&format!(" — {}", row.rule.comment));
+                }
+                let tip = match row.twin {
+                    Some(twin) => format!("{}\n{}", row.rule.raw, twin.raw),
+                    None => row.rule.raw.clone(),
+                };
+                ui.label_tip(&text, Sz::Body, pal.foreground, &tip);
+                ui.label(row.family(), Sz::Tiny, pal.disabled);
+                let left_end = ui.cursor_y();
+                let rw = ui.text_width("Remove…", Sz::Small) + 14;
+                ui.set_area(Rect::new(x + w - rw, y, rw, 0));
+                if ui.button_ex("Remove…", Btn::default().small().enabled(!blocked)) {
+                    delete = Some((row.rule.clone(), row.twin.cloned()));
+                }
+                let end = ui.cursor_y().max(left_end);
+                ui.set_area(Rect::new(x, end, w, 0));
             }
             if !exceptions.is_empty() {
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new("Local exceptions (kept on every profile except Off)").strong(),
+                ui.space(6);
+                ui.strong(
+                    "Local exceptions (kept on every profile except Off)",
+                    Sz::Body,
+                    pal.foreground,
                 );
                 for rule in &exceptions {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!("• {}", ufw::describe_request(rule)))
-                                .color(pal.foreground),
-                        );
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui
-                                .add_enabled(!blocked, Button::new("Stop keeping…").small())
-                                .clicked()
-                            {
-                                remove_exception = Some(rule.clone());
-                            }
-                        });
-                    });
+                    let y = ui.cursor_y();
+                    let (x, w) = (ui.left(), ui.width());
+                    ui.set_area(Rect::new(x, y, (w - btn_w - 8).max(40), 0));
+                    ui.label(
+                        &format!("• {}", ufw::describe_request(rule)),
+                        Sz::Body,
+                        pal.foreground,
+                    );
+                    let left_end = ui.cursor_y();
+                    ui.set_area(Rect::new(x + w - btn_w, y, btn_w, 0));
+                    if ui.button_ex("Stop keeping…", Btn::default().small().enabled(!blocked)) {
+                        remove_exception = Some(rule.clone());
+                    }
+                    let end = ui.cursor_y().max(left_end);
+                    ui.set_area(Rect::new(x, end, w, 0));
                 }
             }
-            if let Some(error) = self.fw.as_ref().and_then(|fw| fw.exceptions_error.clone()) {
-                ui.label(RichText::new(error).color(pal.error).size(11.0));
+            if let Some(error) = &exceptions_error {
+                ui.label(error, Sz::Small, pal.error);
             }
         });
         if load {
-            self.check_firewall(ctx);
+            self.check_firewall();
         }
         if let Some((rule, twin)) = delete {
             self.confirm_delete(&rule, twin.as_ref());
@@ -2013,55 +1958,51 @@ impl NirusecApp {
             .unwrap_or_default();
         let mut restore = None;
         let mut safe = false;
+        let rules_loaded = self.rules_loaded;
+        let helper_busy = self.helper_busy;
         Self::section(ui, pal, |ui| {
-            ui.label(RichText::new("Recent changes").strong().size(15.0));
+            ui.strong("Recent changes", Sz::Big, pal.foreground);
             if entries.is_empty() {
                 ui.label(
-                    RichText::new(if self.rules_loaded {
+                    if rules_loaded {
                         "No NIRUSEC changes recorded yet."
                     } else {
                         "Shown after the rules are checked."
-                    })
-                    .color(pal.disabled),
+                    },
+                    Sz::Body,
+                    pal.disabled,
                 );
             }
             for entry in entries.iter().take(10) {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        RichText::new(fmt_time(entry.at))
-                            .monospace()
-                            .size(10.0)
-                            .color(pal.disabled),
-                    );
-                    ui.label(RichText::new(&entry.description).color(pal.foreground));
-                    ui.label(RichText::new(&entry.result).color(pal.muted).size(10.0));
+                ui.flow(|ui| {
+                    ui.label(&fmt_time(entry.at), Sz::Tiny, pal.disabled);
+                    ui.label(&entry.description, Sz::Body, pal.foreground);
+                    ui.label(&entry.result, Sz::Tiny, pal.muted);
                     let name = std::path::Path::new(&entry.backup)
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
                     if !name.is_empty()
                         && backups.contains(&name)
-                        && ui
-                            .add_enabled(!blocked, Button::new("Restore before this…").small())
-                            .clicked()
+                        && ui.button_ex(
+                            "Restore before this…",
+                            Btn::default().small().enabled(!blocked),
+                        )
                     {
                         restore = Some((name, entry.description.clone(), entry.at));
                     }
                 });
             }
-            ui.add_space(8.0);
-            ui.label(RichText::new("Emergency").strong());
-            ui.label(RichText::new(format!(
+            ui.space(8);
+            ui.strong("Emergency", Sz::Body, pal.foreground);
+            ui.label(&format!(
                 "Locked out or unsure? Safe mode resets UFW to a recovery policy: SSH open on port 22 from anywhere, Tailscale trusted. From a console: sudo {} safe-mode",
                 tx::HELPER_PATH
-            )).color(pal.muted).size(11.0));
-            if ui
-                .add_enabled(
-                    !self.helper_busy,
-                    Button::new("Emergency safe mode…").fill(pal.error),
-                )
-                .clicked()
-            {
+            ), Sz::Small, pal.muted);
+            if ui.button_ex(
+                "Emergency safe mode…",
+                Btn::default().enabled(!helper_busy).fill(pal.error),
+            ) {
                 safe = true;
             }
         });
@@ -2102,173 +2043,237 @@ impl NirusecApp {
         }
     }
 
-    fn confirmation(&mut self, ctx: &Context, pal: &Palette) {
+    fn confirmation(&mut self, ui: &mut Ui, pal: &Palette) {
         let Some(confirm) = &self.confirm else {
             return;
         };
-        let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let mut close = false;
         let mut run = false;
-        let max_height = (ctx.screen_rect().height() - 80.0).max(200.0);
-        egui::Window::new(&confirm.title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .max_height(max_height)
-            .show(ctx, |ui| {
-                ui.set_max_width((ctx.screen_rect().width() - 60.0).clamp(260.0, 560.0));
-                ScrollArea::vertical()
-                    .max_height(max_height - 90.0)
-                    .show(ui, |ui| {
-                        ui.label(&confirm.body);
-                        if !confirm.warnings.is_empty() {
-                            ui.add_space(6.0);
-                            for warning in &confirm.warnings {
-                                ui.label(
-                                    RichText::new(format!("⚠ {warning}"))
-                                        .color(pal.warning)
-                                        .strong(),
-                                );
+        let screen = ui.screen;
+        let w = (screen.w - 60).clamp(260.min(screen.w - 8), 560);
+        let max_h = (screen.h - 80).max(200).min(screen.h - 8);
+        let h = if self.modal_h > 0 {
+            self.modal_h
+        } else {
+            max_h / 2
+        };
+        let x = (screen.w - w) / 2;
+        let y = ((screen.h - h) / 2).max(4);
+        let label = match confirm.kind {
+            ConfirmKind::ApplyProfile(Profile::Off) => "Turn off".to_string(),
+            ConfirmKind::ApplyProfile(_)
+            | ConfirmKind::EnableFirewall
+            | ConfirmKind::RestoreBackup(_) => {
+                format!("Try it for {} s", tx::window_seconds())
+            }
+            ConfirmKind::AddRules(ref rules, _) if rules.iter().any(RuleRequest::is_block) => {
+                format!("Try it for {} s", tx::window_seconds())
+            }
+            _ => "Apply".to_string(),
+        };
+        let fill = if confirm.danger {
+            pal.error
+        } else {
+            pal.accent
+        };
+        let mut height = 0;
+        ui.modal(|ui| {
+            ui.paint_tint(screen, 0x000000, 110);
+            ui.set_area(Rect::new(x, y, w, 0));
+            let (_, r) = ui.frame(fr(pal.background, pal.accent, 1, 14, 6), |ui| {
+                ui.strong(&confirm.title, Sz::Big, pal.foreground);
+                ui.separator();
+                let body_max = (max_h - 120).max(80);
+                ui.scroll_max("nirusec-confirm", body_max, |ui| {
+                    ui.label(&confirm.body, Sz::Body, pal.foreground);
+                    if !confirm.warnings.is_empty() {
+                        ui.space(6);
+                        for warning in &confirm.warnings {
+                            ui.strong(&format!("⚠ {warning}"), Sz::Body, pal.warning);
+                        }
+                    }
+                    if !confirm.commands.is_empty() {
+                        ui.space(6);
+                        if ui.collapsing(
+                            "nirusec-confirm-commands",
+                            &format!("Exact UFW commands ({})", confirm.commands.len()),
+                            false,
+                        ) {
+                            for command in &confirm.commands {
+                                ui.label(command, Sz::Tiny, pal.foreground);
                             }
                         }
-                        if !confirm.commands.is_empty() {
-                            ui.add_space(6.0);
-                            egui::CollapsingHeader::new(format!(
-                                "Exact UFW commands ({})",
-                                confirm.commands.len()
-                            ))
-                            .id_salt("nirusec-confirm-commands")
-                            .show(ui, |ui| {
-                                for command in &confirm.commands {
-                                    ui.label(RichText::new(command).monospace().size(10.0));
-                                }
-                            });
-                        }
-                    });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.add(Button::new("Cancel")).clicked() {
+                    }
+                });
+                ui.space(4);
+                ui.flow(|ui| {
+                    if ui.button("Cancel") {
                         close = true;
                     }
-                    let label = match confirm.kind {
-                        ConfirmKind::ApplyProfile(Profile::Off) => "Turn off".to_string(),
-                        ConfirmKind::ApplyProfile(_)
-                        | ConfirmKind::EnableFirewall
-                        | ConfirmKind::RestoreBackup(_) => {
-                            format!("Try it for {} s", tx::window_seconds())
-                        }
-                        ConfirmKind::AddRules(ref rules, _)
-                            if rules.iter().any(RuleRequest::is_block) =>
-                        {
-                            format!("Try it for {} s", tx::window_seconds())
-                        }
-                        _ => "Apply".to_string(),
-                    };
-                    let fill = if confirm.danger {
-                        pal.error
-                    } else {
-                        pal.accent
-                    };
-                    if ui
-                        .add(Button::new(RichText::new(label).strong()).fill(fill))
-                        .clicked()
-                    {
+                    if ui.button_ex(&label, Btn::default().fill(fill).strong()) {
                         run = true;
                     }
                 });
             });
+            height = r.h;
+        });
+        if height != self.modal_h {
+            self.modal_h = height;
+            ui.st.again = true;
+        }
         if run {
             let confirm = self.confirm.take().expect("confirm present");
+            self.modal_h = 0;
             let action = confirm.action;
             match confirm.kind {
                 ConfirmKind::EnableFirewall
                 | ConfirmKind::UpdatePackages
                 | ConfirmKind::InstallFirmware
                 | ConfirmKind::SafeMode => {
-                    self.run_helper(ctx, action, Vec::new());
+                    self.run_helper(action, Vec::new());
                 }
                 ConfirmKind::ApplyProfile(profile) => {
-                    self.run_helper(ctx, "profile-apply", vec![profile.id().to_string()]);
+                    self.run_helper("profile-apply", vec![profile.id().to_string()]);
                 }
                 ConfirmKind::AddRules(rules, keep) => {
                     let mut args = vec![serde_json::to_string(&rules).unwrap_or_default()];
                     if keep {
                         args.push("--keep".into());
                     }
-                    self.run_helper(ctx, "rules-add", args);
+                    self.run_helper("rules-add", args);
                 }
                 ConfirmKind::DeleteRule(targets) => {
                     let args = targets
                         .into_iter()
                         .flat_map(|(n, raw)| [n.to_string(), raw])
                         .collect();
-                    self.run_helper(ctx, "rule-delete", args);
+                    self.run_helper("rule-delete", args);
                 }
-                ConfirmKind::RestoreBackup(name) => {
-                    self.run_helper(ctx, "backup-restore", vec![name])
-                }
+                ConfirmKind::RestoreBackup(name) => self.run_helper("backup-restore", vec![name]),
                 ConfirmKind::RemoveException(rule) => {
                     self.run_helper(
-                        ctx,
                         "exception-remove",
                         vec![serde_json::to_string(&rule).unwrap_or_default()],
                     );
                 }
-                ConfirmKind::Resolve(how) => {
-                    self.run_helper(ctx, "tx-resolve", vec![how.to_string()])
-                }
+                ConfirmKind::Resolve(how) => self.run_helper("tx-resolve", vec![how.to_string()]),
                 ConfirmKind::UpdateFirmware => {
                     if let Some(device) = self.selected_firmware.take() {
-                        self.run_helper(ctx, "firmware-update", vec![device]);
+                        self.run_helper("firmware-update", vec![device]);
                     }
                 }
             }
+            ui.st.blur();
         } else if close {
             self.confirm = None;
+            self.modal_h = 0;
+            ui.st.blur();
         }
     }
 }
 
-impl eframe::App for NirusecApp {
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        if let Some(theme) = self.theme_watcher.as_ref().and_then(Watcher::poll) {
-            self.theme = theme;
-            theme::apply(ctx, &self.theme);
+impl App for NirusecApp {
+    fn build(&mut self, ui: &mut Ui) {
+        let pal = ui.pal.clone();
+        let screen = ui.screen;
+        let m = if screen.w < 480 { 8 } else { 14 };
+        let area = Rect::new(m, m, (screen.w - 2 * m).max(40), (screen.h - 2 * m).max(40));
+        ui.set_area(area);
+        self.header(ui, &pal);
+        ui.space(2);
+        self.pending_banner(ui, &pal);
+        let wide = ui.width() > 760;
+        let bottom = area.bottom();
+        if wide {
+            let top = ui.cursor_y();
+            ui.set_area(Rect::new(area.x, top, 145, 0));
+            self.nav(ui, &pal, true);
+            ui.paint_fill(Rect::new(area.x + 155, top, 1, bottom - top), pal.border);
+            ui.set_area(Rect::new(area.x + 167, top, area.w - 167, 0));
+            self.content(ui, &pal, bottom);
+        } else {
+            self.nav(ui, &pal, false);
+            self.content(ui, &pal, bottom);
         }
-        self.process_jobs(ctx);
-        // Tick once a second only while a rollback window is open (bounded by
-        // the window plus a short grace period for the automatic restore).
-        if self.profile.pending() && self.remaining() > -30 {
-            if self.last_profile_poll.elapsed() >= Duration::from_secs(1) {
-                self.last_profile_poll = Instant::now();
-                let was_pending = self.profile.pending();
-                self.sync_profile();
-                if was_pending && !self.profile.pending() && self.auto_status {
-                    self.check_firewall(ctx);
-                    self.refresh_status(ctx);
+        self.confirmation(ui, &pal);
+    }
+
+    fn key(&mut self, k: &KeyEv, st: &mut State) -> bool {
+        if k.ctrl && matches!(k.ch, Some('q') | Some('w')) {
+            st.quit = true;
+            return true;
+        }
+        if self.confirm.is_some() {
+            if k.is(keys::ESCAPE) && !st.popup_open() {
+                self.confirm = None;
+                self.modal_h = 0;
+                st.blur();
+                return true;
+            }
+            return false;
+        }
+        if k.is(keys::F5) || k.ctrl && matches!(k.ch, Some('r') | Some('R')) {
+            if !self.status_busy {
+                self.refresh_all();
+            }
+            return true;
+        }
+        // Ctrl+1 … Ctrl+7 switch views.
+        if k.ctrl {
+            if let Some(d) = k.ch.and_then(|c| c.to_digit(10)) {
+                if (1..=7).contains(&d) {
+                    let view = VIEWS[d as usize - 1];
+                    if self.view != view {
+                        self.view = view;
+                        st.reset_scroll(SCROLL);
+                    }
+                    return true;
                 }
             }
-            ctx.request_repaint_after(Duration::from_secs(1));
         }
-        let pal = self.theme.palette.clone();
-        egui::CentralPanel::default()
-            .frame(Frame::none().fill(pal.background).inner_margin(14.0))
-            .show(ctx, |ui| {
-                self.header(ui, ctx, &pal);
-                ui.add_space(6.0);
-                self.pending_banner(ui, ctx, &pal);
-                let wide = ui.available_width() > 760.0;
-                if wide {
-                    ui.horizontal_top(|ui| {
-                        self.nav(ui, &pal, true);
-                        ui.vertical(|ui| {
-                            self.content(ui, ctx, &pal);
-                        });
-                    });
-                } else {
-                    self.nav(ui, &pal, false);
-                    self.content(ui, ctx, &pal);
-                }
-            });
-        self.confirmation(ctx, &pal);
+        false
+    }
+
+    fn key_late(&mut self, k: &KeyEv, st: &mut State) -> bool {
+        if self.confirm.is_some() {
+            return false;
+        }
+        let page = (st.scroll_view_height(SCROLL) - 40).max(40);
+        let delta = match k.ks {
+            keys::PAGE_DOWN => page,
+            keys::PAGE_UP => -page,
+            keys::DOWN => 40,
+            keys::UP => -40,
+            keys::HOME if !k.ctrl => -1_000_000,
+            keys::END if !k.ctrl => 1_000_000,
+            _ => return false,
+        };
+        st.scroll_by(SCROLL, delta)
+    }
+
+    fn poll(&mut self) -> bool {
+        self.process_jobs()
+    }
+
+    // Tick once a second only while a rollback window is open (bounded by
+    // the window plus a short grace period for the automatic restore).
+    fn next_tick(&self) -> Option<Instant> {
+        (self.profile.pending() && self.remaining() > -30)
+            .then(|| self.last_profile_poll + Duration::from_secs(1))
+    }
+
+    fn tick(&mut self) -> bool {
+        self.last_profile_poll = Instant::now();
+        let was_pending = self.profile.pending();
+        self.sync_profile();
+        if was_pending && !self.profile.pending() && self.auto_status {
+            self.check_firewall();
+            self.refresh_status();
+        }
+        true
+    }
+
+    fn modal(&self) -> bool {
+        self.confirm.is_some()
     }
 }

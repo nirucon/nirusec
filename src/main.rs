@@ -1,6 +1,6 @@
 mod app;
+mod gui;
 mod helper;
-mod theme;
 
 use app::View;
 use nirusec::{cache, firewall, model::Status, system};
@@ -212,26 +212,17 @@ fn main() {
 }
 
 fn run_gui(initial: Option<View>) {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("NIRUSEC")
-            .with_app_id("nirusec")
-            .with_inner_size(egui::vec2(980.0, 720.0))
-            .with_min_inner_size(egui::vec2(360.0, 320.0))
-            .with_resizable(true),
-        renderer: eframe::Renderer::Glow,
-        vsync: true,
-        multisampling: 0,
-        depth_buffer: 0,
-        stencil_buffer: 0,
-        ..Default::default()
+    let started = std::time::Instant::now();
+    let mut app = app::NirusecApp::new(initial, gui::shell::waker());
+    let opts = gui::shell::Opts {
+        title: "NIRUSEC",
+        class: "nirusec",
+        size: (980, 720),
+        min: (360, 320),
+        icon: 'S',
+        timing_env: "NIRUSEC_TIMING",
     };
-    let result = eframe::run_native(
-        "NIRUSEC",
-        options,
-        Box::new(move |cc| Ok(Box::new(app::NirusecApp::new(cc, initial)))),
-    );
-    if let Err(error) = result {
+    if let Err(error) = gui::shell::run(&mut app, opts, started) {
         eprintln!("nirusec: display/window initialization failed: {error}");
         eprintln!("NIRUSEC needs a graphical X11/XWayland session for the GUI. Use --check/--status headlessly.");
         std::process::exit(1);

@@ -48,18 +48,20 @@ fi
 
 runtime_deps() {
     [ "$DEPS" = 1 ] || return 0
-    say 'Installing NIRUSEC GUI runtime dependencies…'
+    # The binary is static and draws its own window over X11: no OpenGL or
+    # toolkit libraries. Only UFW and PolicyKit are needed at runtime.
+    say 'Installing NIRUSEC runtime dependencies (UFW, PolicyKit)…'
     case "$OS" in
         debian)
-            sudo apt-get install -y libxkbcommon-x11-0 libx11-6 libgl1 libegl1 libxcb1 libxkbcommon0 ufw pkexec >/dev/null 2>&1 || die 'could not install Debian runtime dependencies'
+            sudo apt-get install -y ufw pkexec >/dev/null 2>&1 || die 'could not install Debian runtime dependencies'
             ;;
         arch)
-            sudo pacman -S --needed --noconfirm libxkbcommon libxkbcommon-x11 libx11 libxcb libglvnd ufw polkit >/dev/null 2>&1 || die 'could not install Arch runtime dependencies'
+            sudo pacman -S --needed --noconfirm ufw polkit >/dev/null 2>&1 || die 'could not install Arch runtime dependencies'
             ;;
         void)
-            sudo xbps-install -y libxkbcommon libxkbcommon-x11 libX11 libxcb libglvnd ufw polkit >/dev/null 2>&1 || die 'could not install Void runtime dependencies'
+            sudo xbps-install -y ufw polkit >/dev/null 2>&1 || die 'could not install Void runtime dependencies'
             ;;
-        *) say 'warning: unknown distribution; check libxkbcommon-x11, OpenGL, UFW and pkexec manually' ;;
+        *) say 'warning: unknown distribution; check UFW and pkexec manually' ;;
     esac
 }
 

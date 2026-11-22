@@ -6,7 +6,7 @@ Firewall, ports, updates, firmware and Docker overview for a NIRUX desktop, in p
 
 ## About
 
-NIRUSEC is a quiet Rust/egui desktop tool for the parts of a Linux machine that
+NIRUSEC is a quiet Rust desktop tool for the parts of a Linux machine that
 are easy to forget: the UFW firewall, listening services, blocked traffic,
 package updates, CPU microcode, firmware and running Docker containers. It is a
 friendly front end for UFW, written for people who do not read `ufw status`
@@ -53,7 +53,8 @@ Every view, the safety model and the limitations are described in detail in the
 
 ## Requirements
 
-- Debian, Arch or Void Linux (glibc), x86_64, X11 with OpenGL.
+- Debian, Arch or Void Linux, x86_64, an X11 session. The release binary is
+  static (musl) and draws its own window: no OpenGL or toolkit libraries.
 - `sudo` for installation, PolicyKit (`pkexec`) at runtime.
 - UFW. The installer installs it as a dependency but **does not enable it**.
 - Optional: Tailscale, Docker, `fwupd`.
@@ -77,7 +78,7 @@ Run the installer as your desktop user, **not** with `sudo`; it asks for sudo
 only to install the root helper and the PolicyKit action.
 
 ```sh
-tar -xzf nirusec-0.2.0-x86_64-linux-gnu.tar.gz    # from the GitHub release
+tar -xzf nirusec-0.3.0-x86_64-linux-musl.tar.gz   # from the GitHub release
 ./install.sh
 ```
 
@@ -106,6 +107,20 @@ nirusec --profile-rules soft             # exact UFW rules of soft, medium, hard
 nirusec --profile-state                  # the recorded firewall profile state
 nirusec --version
 ```
+
+In the window:
+
+| Key | Action |
+|---|---|
+| `Tab` / `Shift+Tab` | Move between buttons, fields and lists |
+| `Enter` / `Space` | Press the focused button, open the focused list |
+| `Up` / `Down` | Change the focused list; otherwise scroll |
+| `Page Up` / `Page Down`, `Home` / `End` | Scroll the view |
+| `Ctrl+1` … `Ctrl+7` | Overview, Firewall, Ports, Logs, Updates, Firmware, Docker |
+| `F5` / `Ctrl+R` | Refresh |
+| `Esc` | Close a confirmation or an open list |
+| `Ctrl+V` | Paste into a text field |
+| `Ctrl+Q` / `Ctrl+W` | Close |
 
 `--check` is short-lived on purpose. NIRUBAR runs it only when the cache is
 stale, so a running bar never starts package queries every second.
@@ -170,6 +185,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --release --locked
 sudo tests/netns/run.sh target/release/nirusec        # real UFW in an isolated namespace
+tests/xvfb.sh target/release/nirusec                  # end-to-end GUI test in Xvfb
 tests/gui/run-xvfb.sh target/release/nirusec shots    # Xvfb screenshots
 ./install.sh --build                                  # local development install
 ```
@@ -178,6 +194,22 @@ tests/gui/run-xvfb.sh target/release/nirusec shots    # Xvfb screenshots
 mount namespace; the host firewall and files are never touched. Use
 `NIRUSEC_HELPER=/path/to/nirusec` only in a disposable environment: the GUI then
 runs that helper instead of `pkexec`.
+
+### Performance
+
+Since 0.3.0 the window is drawn by a small software canvas on x11rb (the
+NIRUFM toolkit) instead of egui and OpenGL. Measured on othala in the same
+Xvfb, three starts each:
+
+| | 0.2.0 (egui) | 0.3.0 |
+|---|---|---|
+| First frame | window mapped after 80 to 117 ms | 13 to 16 ms |
+| Memory (RSS) | 112 to 119 MB | 7.8 MB |
+| CPU while idle | 0 | 0 |
+| Binary | 7.5 MB, glibc | 2.1 MB, static |
+
+While idle the program sleeps in `poll()`; it ticks once a second only while a
+firewall change waits for Keep.
 
 More: [Roadmap](ROADMAP.md), [0.2 review](docs/REVIEW-0.2.md),
 [acceptance record](docs/ACCEPTANCE.md), [Fail2ban guidance](docs/FAIL2BAN.md).

@@ -63,7 +63,7 @@ are separate products unless explicitly added by the owner.
 
 ## Implementation approach
 
-Prefer Rust with egui/eframe, building on lessons from NIRUAMP. Inspect current
+Prefer Rust with the NIRU x11rb toolkit (src/gui, shared with NIRUFM; egui until 0.2). Inspect current
 suite repositories before choosing APIs or copying code. Use focused modules
 for UI, models, theme resolution, firewall, sockets/logs, updates, firmware,
 cache/checker, privilege boundary and platform adapters.
