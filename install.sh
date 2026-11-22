@@ -126,15 +126,33 @@ if [ -f SHA256SUMS ] && [ "$MODE" != build ]; then
 fi
 
 runtime_deps
+
+# The root helper is the same binary at a fixed path. It is installed first:
+# when root is not available (no terminal for sudo, as in the nightly NIRUX
+# update) nothing is replaced, so the window and the helper never end up on
+# different versions. A helper and policy that are already current need no
+# sudo at all.
+helper_current() {
+    [ -f "$HELPER" ] && [ -f "$POLICY" ] &&
+        [ "$(sha256sum "$HELPER" | awk '{print $1}')" = "$(sha256sum "$BIN_SRC" | awk '{print $1}')" ] &&
+        [ "$(sha256sum "$POLICY" | awk '{print $1}')" = "$(sha256sum assets/se.nirucon.nirusec.policy | awk '{print $1}')" ]
+}
+if helper_current; then
+    say 'The privileged helper and PolicyKit action are current.'
+else
+    say 'Installing the single binary as the fixed privileged helper and PolicyKit action…'
+    sudo install -D -m 0755 "$BIN_SRC" "$HELPER" ||
+        die 'could not install the privileged helper (needs sudo); nothing was replaced. Run the installer in a terminal'
+    sudo install -D -m 0644 assets/se.nirucon.nirusec.policy "$POLICY" ||
+        die 'could not install the PolicyKit action (needs sudo)'
+fi
+
 install -d -m 0755 "$BINDIR" "$APPDIR" "$ICONDIR"
 install -m 0755 "$BIN_SRC" "$BINDIR/nirusec"
 install -m 0644 assets/nirusec.svg "$ICONDIR/nirusec.svg"
 sed "s|^Exec=nirusec$|Exec=$BINDIR/nirusec|" assets/nirusec.desktop > "$APPDIR/nirusec.desktop"
 chmod 0644 "$APPDIR/nirusec.desktop"
 
-say 'Installing the single binary as the fixed privileged helper and PolicyKit action…'
-sudo install -D -m 0755 "$BIN_SRC" "$HELPER"
-sudo install -D -m 0644 assets/se.nirucon.nirusec.policy "$POLICY"
 need pkexec || die 'pkexec (PolicyKit) is required for privileged firewall and update actions'
 if need pkaction; then
     pkaction --action-id se.nirucon.nirusec.status >/dev/null 2>&1 \

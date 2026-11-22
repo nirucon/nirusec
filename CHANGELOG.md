@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2 (2026-11-22)
+
+- The installer puts the privileged helper in place first and stops before
+  changing anything when root is not available, so the window and the
+  helper are never on different versions. A current helper needs no sudo.
+
 ## 0.3.1 (2026-11-22)
 
 - The installer no longer asks for sudo when UFW and pkexec are already
