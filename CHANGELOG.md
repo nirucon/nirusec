@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1 (2026-11-22)
+
+- The installer no longer asks for sudo when UFW and pkexec are already
+  installed, so the nightly NIRUX update can update NIRUSEC.
+
 ## 0.3.0 (2026-11-22)
 
 - The window is drawn with x11rb and a small software canvas (the NIRUFM

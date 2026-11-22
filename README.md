@@ -78,7 +78,7 @@ Run the installer as your desktop user, **not** with `sudo`; it asks for sudo
 only to install the root helper and the PolicyKit action.
 
 ```sh
-tar -xzf nirusec-0.3.0-x86_64-linux-musl.tar.gz   # from the GitHub release
+tar -xzf nirusec-0.3.1-x86_64-linux-musl.tar.gz   # from the GitHub release
 ./install.sh
 ```
 

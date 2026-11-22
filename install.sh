@@ -48,6 +48,11 @@ fi
 
 runtime_deps() {
     [ "$DEPS" = 1 ] || return 0
+    # Already there: nothing to install, so no sudo (the nightly NIRUX update
+    # runs extras installers without a terminal).
+    if { need ufw || [ -x /usr/sbin/ufw ] || [ -x /sbin/ufw ]; } && need pkexec; then
+        return 0
+    fi
     # The binary is static and draws its own window over X11: no OpenGL or
     # toolkit libraries. Only UFW and PolicyKit are needed at runtime.
     say 'Installing NIRUSEC runtime dependencies (UFW, PolicyKit)…'
